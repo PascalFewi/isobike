@@ -7,27 +7,45 @@ something independent to be wrong against.
 Not one of the spec's ``build/`` modules. It lives under ``testdata/`` because it
 is test scaffolding, not part of the pipeline that produces R2 artefacts.
 
+Cost model (spec v1.1)
+======================
+
+The weight of a directed edge is **time in seconds**::
+
+    w = dist / v_flat + ascent / vam        (v_flat in m/s, vam in Hm/s = m/s)
+
+expressed as a sum-family with parameters ``w = a*dist + b*ascent`` where
+``a = 1/v_flat`` and ``b = 1/vam`` (see :class:`CostModel`). The route that
+minimises time is *identical* to the one the old ``dist + cf*ascent`` model
+found, because ``time = (1/v_flat) * (dist + cf*ascent)`` with ``cf = v_flat/vam``
+and ``1/v_flat`` is a positive constant. So all the A*/Dijkstra correctness
+carries over; only the reported cost is now seconds. Steepness is a *filter only*,
+never a cost term.
+
+Dijkstra additionally accumulates, per node and along the cost-optimal path, the
+cumulative ascent and the max slope encountered -- at zero extra asymptotic cost,
+and as the prerequisite for the effort field's second colour channel.
+
 Cross-language determinism
 ==========================
 
-Costs are bit-identical between this module and ``router.ts``, and that is not a
-happy accident:
+Costs are bit-identical between this module and ``router.ts``:
 
+* ``a`` and ``b`` are the same f64 on both sides -- both compute ``1/v_flat`` from
+  the identical ``v_flat`` value (IEEE division is correctly rounded), and the
+  golden files carry ``v_flat``/``vam`` at full precision.
 * Every quantity that enters a cost -- ``dist``, ``ascent`` -- is read from the
-  binary as f32 and widened to f64. Both languages therefore sum *the same*
-  doubles in *the same order* along a path.
-* NumPy arrays are converted to Python lists of ``float`` up front. Left as numpy
-  scalars, ``np.float32(x) * 1.0`` could evaluate in float32 depending on the
-  NumPy version's promotion rules, quietly halving precision on one side only.
-* Ties are broken identically: the heap orders on ``(key, node_id)`` and
-  relaxation is strictly ``<``, so the first predecessor to achieve a cost keeps
-  it. ``heapq`` compares tuples lexicographically, which is exactly what the
-  TypeScript heap implements by hand.
+  binary as f32 and widened to f64, so both languages sum ``a*dist + b*ascent``
+  over the same doubles in the same order along a path.
+* NumPy arrays are converted to Python lists of ``float`` up front, so a numpy
+  scalar's float32 promotion rules cannot silently halve precision on one side.
+* Ties break identically: the heap orders on ``(key, node_id)`` and relaxation is
+  strictly ``<``, so the first predecessor to achieve a cost keeps it.
 
 The one thing that is *not* bit-identical is :func:`math.sin` and friends, which
 no standard requires to be correctly rounded. That is confined to the A*
-heuristic, where a last-ulp difference can only reorder expansions, and to
-snapping, where ties break on node id.
+heuristic (a last-ulp difference only reorders expansions) and to snapping (ties
+break on node id).
 """
 
 from __future__ import annotations
@@ -45,15 +63,85 @@ from build.geo import haversine_m, local_xy
 #: Shrinks the A* heuristic just enough that floating-point noise cannot make it
 #: overestimate. The straight-line term is computed in f64 from f32 coordinates
 #: while ``edge_dist`` is a *rounded* f32, so on a near-straight path the
-#: heuristic can exceed the true remaining cost by a few ulp and cost A* its
-#: optimality guarantee. 2^-16 of slack swamps that by orders of magnitude while
-#: costing ~0.0015 % of search efficiency.
-#:
-#: Scaling a consistent heuristic by c <= 1 preserves consistency: if
-#: h(u) <= w(u,v) + h(v) then c*h(u) <= c*w + c*h(v) <= w + c*h(v).
+#: heuristic can exceed the true remaining cost by a few ulp. 2^-16 of slack
+#: swamps that by orders of magnitude while costing ~0.0015 % of search
+#: efficiency. Scaling a consistent heuristic by c <= 1 preserves consistency.
 H_SAFETY: Final = 1.0 - 2.0**-16
 
 INF: Final = float("inf")
+
+
+@dataclass(frozen=True)
+class CostModel:
+    """Linear sum-family edge weight ``w = a*dist + b*ascent``.
+
+    For the time metric ``a = 1/v_flat`` (s/m) and ``b = 1/vam`` (s/m), so ``w``
+    is seconds. The distance-equivalent fallback keeps ``a = 1`` and folds the
+    old climb_factor into ``b``.
+
+    Held as the reciprocals, not as speeds, because the reciprocals are what the
+    weight and heuristic multiply -- computing them once keeps the hot path a
+    multiply-add and keeps Python and TypeScript bit-identical.
+    """
+
+    a: float  # seconds per metre of distance   = 1 / v_flat
+    b: float  # seconds per metre of ascent      = 1 / vam
+
+    @classmethod
+    def time(cls, v_flat_mps: float, vam_mps: float) -> CostModel:
+        """From a profile's flat speed (m/s) and vertical speed (Hm/s = m/s)."""
+        if v_flat_mps <= 0.0 or vam_mps <= 0.0:
+            raise ValueError("v_flat and vam must be positive")
+        return cls(1.0 / v_flat_mps, 1.0 / vam_mps)
+
+    @classmethod
+    def distance_equiv(cls, climb_factor: float) -> CostModel:
+        """Internal fallback: ``w = dist + climb_factor*ascent`` (metres, not seconds)."""
+        return cls(1.0, climb_factor)
+
+
+#: km/h -> m/s and Hm/h -> m/s. Defined as constants so the exact double is fixed
+#: and every profile derives from the same conversion.
+KMH_TO_MPS: Final = 1000.0 / 3600.0
+HMH_TO_MPS: Final = 1.0 / 3600.0
+
+
+@dataclass(frozen=True)
+class Profile:
+    """A rider profile: flat speed and vertical (climbing) speed, both in m/s.
+
+    ``cf = v_flat / vam`` is what actually drives route choice. A flat specialist
+    (fast on the flat, slow uphill) has a *high* cf and avoids climbing; a climber
+    has a lower cf. The spec's anchors: Flach 30 km/h / 500 Hm/h, Mixed 27 / 700,
+    Gebirge 25 / 900.
+    """
+
+    name: str
+    v_flat_mps: float
+    vam_mps: float
+
+    @classmethod
+    def from_kmh(cls, name: str, v_flat_kmh: float, vam_hmh: float) -> Profile:
+        return cls(name, v_flat_kmh * KMH_TO_MPS, vam_hmh * HMH_TO_MPS)
+
+    @property
+    def climb_factor(self) -> float:
+        return self.v_flat_mps / self.vam_mps
+
+    def model(self) -> CostModel:
+        return CostModel.time(self.v_flat_mps, self.vam_mps)
+
+
+#: The spec's three anchor profiles, shared by the golden generator and tests.
+PROFILES: Final[tuple[Profile, ...]] = (
+    Profile.from_kmh("flach", 30.0, 500.0),
+    Profile.from_kmh("mixed", 27.0, 700.0),
+    Profile.from_kmh("gebirge", 25.0, 900.0),
+)
+
+#: Default effort-field budget: 8 hours, in seconds. Profile-independent because
+#: the cost is now time. Replaces the old distance-equivalent 216 000 m.
+DEFAULT_BUDGET_S: Final = 8 * 3600.0
 
 
 @dataclass(frozen=True)
@@ -62,11 +150,29 @@ class RouteResult:
 
     nodes: list[int]
     edge_ids: list[int]
+    #: Optimisation cost of the path -- seconds under the time model.
     cost: float
     dist_m: float
     ascent_m: float
     descent_m: float
     max_slope_pct: float
+
+
+@dataclass(frozen=True)
+class DijkstraResult:
+    """Single-source search state. Arrays are indexed by node id.
+
+    ``cum_ascent`` and ``max_slope_u8`` are taken *along the cost-optimal path* to
+    each node -- updated exactly when ``cost`` improves, so they are final once the
+    node is settled. They are the prerequisite for the effort field's second
+    channel and the reason the spec has Dijkstra carry three values, not one.
+    """
+
+    cost: list[float]
+    cum_ascent: list[float]
+    max_slope_u8: list[int]
+    #: Directed half-edge used to reach each node, or -1 for source/unreached.
+    incoming: list[int]
 
 
 @dataclass(frozen=True)
@@ -103,9 +209,9 @@ def flatten(graph: bf.Graph) -> _Flat:
     )
 
 
-def edge_weight(f: _Flat, e: int, climb_factor: float) -> float:
-    """``w = dist + climb_factor * ascent``, the spec's cost model, in f64."""
-    return f.edge_dist[e] + climb_factor * f.edge_ascent[e]
+def edge_weight(f: _Flat, e: int, model: CostModel) -> float:
+    """``w = a*dist + b*ascent`` in f64 -- seconds under the time model."""
+    return model.a * f.edge_dist[e] + model.b * f.edge_ascent[e]
 
 
 def _blocked(f: _Flat, e: int, max_slope_pct: float | None) -> bool:
@@ -122,21 +228,24 @@ def _blocked(f: _Flat, e: int, max_slope_pct: float | None) -> bool:
 def dijkstra(
     f: _Flat,
     source: int,
-    climb_factor: float,
+    model: CostModel,
     *,
     max_slope_pct: float | None = None,
     max_cost: float = INF,
-) -> tuple[list[float], list[int]]:
-    """Single-source shortest costs. Returns ``(cost_per_node, incoming_edge)``.
+) -> DijkstraResult:
+    """Single-source shortest costs, carrying three accumulators per node.
 
-    ``incoming_edge[v]`` is the *directed half-edge index* used to reach ``v``, or
-    -1 for the source and anything unreached. Storing the half-edge rather than
-    the predecessor node keeps reconstruction unambiguous when two nodes are
-    joined by more than one edge.
+    ``incoming[v]`` is the *directed half-edge index* used to reach ``v``, or -1
+    for the source and anything unreached. Storing the half-edge rather than the
+    predecessor node keeps reconstruction unambiguous when two nodes are joined
+    by more than one edge.
     """
-    cost = [INF] * f.node_count
-    incoming = [-1] * f.node_count
-    settled = [False] * f.node_count
+    n = f.node_count
+    cost = [INF] * n
+    cum_ascent = [0.0] * n
+    max_slope_u8 = [0] * n
+    incoming = [-1] * n
+    settled = [False] * n
 
     cost[source] = 0.0
     heap: list[tuple[float, int]] = [(0.0, source)]
@@ -149,19 +258,25 @@ def dijkstra(
             break  # heap is ordered: nothing cheaper remains
         settled[u] = True
 
+        cu_ascent = cum_ascent[u]
+        cu_slope = max_slope_u8[u]
         for e in range(f.csr_offset[u], f.csr_offset[u + 1]):
             if _blocked(f, e, max_slope_pct):
                 continue
             v = f.edge_target[e]
             if settled[v]:
                 continue
-            nc = c + edge_weight(f, e, climb_factor)
+            nc = c + edge_weight(f, e, model)
             if nc < cost[v]:  # strict: first predecessor to reach this cost keeps it
                 cost[v] = nc
+                # Accumulate the secondary quantities along this same optimal edge.
+                cum_ascent[v] = cu_ascent + f.edge_ascent[e]
+                s = f.edge_max_slope[e]
+                max_slope_u8[v] = cu_slope if cu_slope >= s else s
                 incoming[v] = e
                 heapq.heappush(heap, (nc, v))
 
-    return cost, incoming
+    return DijkstraResult(cost, cum_ascent, max_slope_u8, incoming)
 
 
 # --------------------------------------------------------------------------- #
@@ -169,36 +284,38 @@ def dijkstra(
 # --------------------------------------------------------------------------- #
 
 
-def heuristic(f: _Flat, node: int, goal: int, climb_factor: float) -> float:
-    """Admissible lower bound: straight line plus the climb that cannot be avoided.
+def heuristic(f: _Flat, node: int, goal: int, model: CostModel) -> float:
+    """Admissible lower bound on time: straight line plus unavoidable climb.
 
-    ``sum(dist) >= great-circle`` because a polyline obeys the triangle inequality
-    on a sphere, and ``sum(ascent) >= max(0, net gain)`` because descent is never
-    negative. The sum of two independent lower bounds is a lower bound.
+    ``sum(dist) >= great-circle`` because a polyline obeys the triangle
+    inequality on a sphere, and ``sum(ascent) >= max(0, net gain)`` because
+    descent is never negative. Scaled into seconds by the model's ``a`` and ``b``;
+    the sum of two independent lower bounds is a lower bound.
 
     Still admissible under a slope filter: removing edges can only *raise* the
     true remaining cost, and h does not change.
     """
     line = haversine_m(f.node_lat[node], f.node_lon[node], f.node_lat[goal], f.node_lon[goal])
     climb = max(0.0, f.node_elev[goal] - f.node_elev[node])
-    return H_SAFETY * (line + climb_factor * climb)
+    return H_SAFETY * (model.a * line + model.b * climb)
 
 
 def astar(
     f: _Flat,
     source: int,
     goal: int,
-    climb_factor: float,
+    model: CostModel,
     *,
     max_slope_pct: float | None = None,
 ) -> RouteResult | None:
     """Optimal route via A*, or ``None`` if the goal is unreachable."""
-    g_cost = [INF] * f.node_count
-    incoming = [-1] * f.node_count
-    settled = [False] * f.node_count
+    n = f.node_count
+    g_cost = [INF] * n
+    incoming = [-1] * n
+    settled = [False] * n
 
     g_cost[source] = 0.0
-    heap: list[tuple[float, int]] = [(heuristic(f, source, goal, climb_factor), source)]
+    heap: list[tuple[float, int]] = [(heuristic(f, source, goal, model), source)]
 
     while heap:
         _f_score, u = heapq.heappop(heap)
@@ -215,11 +332,11 @@ def astar(
             v = f.edge_target[e]
             if settled[v]:
                 continue
-            nc = cu + edge_weight(f, e, climb_factor)
+            nc = cu + edge_weight(f, e, model)
             if nc < g_cost[v]:
                 g_cost[v] = nc
                 incoming[v] = e
-                heapq.heappush(heap, (nc + heuristic(f, v, goal, climb_factor), v))
+                heapq.heappush(heap, (nc + heuristic(f, v, goal, model), v))
 
     if not settled[goal]:
         return None
@@ -250,7 +367,6 @@ def build_route(
         if e < 0:
             return None
         edges.append(e)
-        # The half-edge's source is the node whose CSR block contains it.
         node = _source_of(f, e)
     edges.reverse()
 
@@ -293,15 +409,15 @@ def route(
     f: _Flat,
     source: int,
     goal: int,
-    climb_factor: float,
+    model: CostModel,
     *,
     max_slope_pct: float | None = None,
 ) -> RouteResult | None:
     """Ground-truth route via full Dijkstra -- no heuristic in the trusted path."""
-    cost, incoming = dijkstra(f, source, climb_factor, max_slope_pct=max_slope_pct)
-    if cost[goal] == INF:
+    result = dijkstra(f, source, model, max_slope_pct=max_slope_pct)
+    if result.cost[goal] == INF:
         return None
-    return build_route(f, source, goal, cost, incoming)
+    return build_route(f, source, goal, result.cost, result.incoming)
 
 
 # --------------------------------------------------------------------------- #
@@ -312,38 +428,47 @@ def route(
 def effort_field(
     f: _Flat,
     source: int,
-    climb_factor: float,
+    model: CostModel,
     *,
     max_slope_pct: float | None = None,
     max_cost: float = INF,
-) -> dict[int, float]:
-    """``edge_id -> effort to reach that edge``, for the whole reachable field.
+) -> dict[int, tuple[float, float]]:
+    """``edge_id -> (time, cum_ascent)`` over the whole reachable field.
 
-    Per decision D2 an edge's cost is ``min(cost[u], cost[v])`` -- the effort to
-    *reach* it, which is the isochrone convention and what "wohin man mit welchem
-    Aufwand kommt" asks for. ``max(...)`` would mean "effort to have fully
-    traversed it" and would make the frontier look artificially expensive.
+    Per decision D2 an edge's reach ``time`` is ``min(cost[u], cost[v])`` -- the
+    effort to *reach* it, the isochrone convention. ``cum_ascent`` is taken at the
+    *same* (cheaper) endpoint, so time and climb refer to one consistent journey.
+    On a cost tie the endpoint with the smaller cum_ascent wins, which is
+    deterministic and identical across languages because both halves of the
+    geometric edge evaluate the same two endpoints and we keep the lexicographic
+    minimum ``(time, cum_ascent)``.
 
     A geometric edge is omitted when both of its halves are removed by the slope
-    filter: colouring a road the rider is filtering out would misreport reach.
+    filter, or when it is unreachable: colouring a road the rider is filtering
+    out, or cannot reach, would misreport reach.
     """
-    cost, _ = dijkstra(f, source, climb_factor, max_slope_pct=max_slope_pct, max_cost=max_cost)
+    res = dijkstra(f, source, model, max_slope_pct=max_slope_pct, max_cost=max_cost)
+    cost, cum_ascent = res.cost, res.cum_ascent
 
-    field: dict[int, float] = {}
+    field: dict[int, tuple[float, float]] = {}
     for u in range(f.node_count):
         for e in range(f.csr_offset[u], f.csr_offset[u + 1]):
             if _blocked(f, e, max_slope_pct):
                 continue
             v = f.edge_target[e]
-            reach = min(cost[u], cost[v])
-            # `reach > max_cost` alone does not exclude unreachable edges: with a
-            # default budget of infinity, `inf > inf` is False and the entire
-            # disconnected component would be emitted at cost infinity.
-            if reach == INF or reach > max_cost:
+            if cost[u] <= cost[v]:
+                t, asc = cost[u], cum_ascent[u]
+            else:
+                t, asc = cost[v], cum_ascent[v]
+            # `t > max_cost` alone does not exclude unreachable edges: with the
+            # default infinite budget, `inf > inf` is False and the whole
+            # disconnected component would leak in at cost infinity.
+            if t == INF or t > max_cost:
                 continue
             eid = f.edge_id[e]
-            if eid not in field or reach < field[eid]:
-                field[eid] = reach
+            cur = field.get(eid)
+            if cur is None or (t, asc) < cur:
+                field[eid] = (t, asc)
     return field
 
 
@@ -371,16 +496,15 @@ def snap_grid(graph: bf.Graph, f: _Flat, lat: float, lon: float) -> int:
 
     The ring search does **not** stop at the first non-empty ring. It keeps going
     until the nearest possible point of the next ring is farther than the best
-    candidate found so far. Stopping early is the classic snapping bug: it is
-    invisible in dense terrain and wrong exactly at region borders and across the
-    empty cells that make up half of any real grid.
+    candidate found so far. Stopping early is the classic snapping bug: invisible
+    in dense terrain, wrong exactly at region borders and across the empty cells
+    that make up half of any real grid.
     """
     min_lon, min_lat, max_lon, max_lat = graph.bbox
     nx, ny = graph.grid_nx, graph.grid_ny
     cell_w = (max_lon - min_lon) / nx
     cell_h = (max_lat - min_lat) / ny
 
-    # Query cell, clamped -- a point outside the bbox searches from the border.
     cx = min(nx - 1, max(0, int(math.floor((lon - min_lon) / cell_w)) if cell_w > 0 else 0))
     cy = min(ny - 1, max(0, int(math.floor((lat - min_lat) / cell_h)) if cell_h > 0 else 0))
 
@@ -392,12 +516,12 @@ def snap_grid(graph: bf.Graph, f: _Flat, lat: float, lon: float) -> int:
         nonlocal best, best_d2
         cell = iy * nx + ix
         for slot in range(int(graph.grid_offset[cell]), int(graph.grid_offset[cell + 1])):
-            n = int(graph.grid_nodeid[slot])
-            px, py = local_xy(f.node_lat[n], f.node_lon[n], lat)
+            node = int(graph.grid_nodeid[slot])
+            px, py = local_xy(f.node_lat[node], f.node_lon[node], lat)
             d2 = (px - qx) ** 2 + (py - qy) ** 2
-            if d2 < best_d2 or (d2 == best_d2 and n < best):
+            if d2 < best_d2 or (d2 == best_d2 and node < best):
                 best_d2 = d2
-                best = n
+                best = node
 
     max_ring = max(nx, ny)
     for ring in range(max_ring + 1):
@@ -408,17 +532,14 @@ def snap_grid(graph: bf.Graph, f: _Flat, lat: float, lon: float) -> int:
                 if ring == 0 or ix in (x_lo, x_hi) or iy in (y_lo, y_hi):
                     consider(ix, iy)
 
-        # Termination is decided *after* consuming the ring, never before. The
-        # bound says "everything outside rings 0..ring is at least `gap` away";
-        # testing it beforehand would use it to skip ring `ring` itself, which it
-        # does not cover -- the search would then miss a nearer node whenever the
-        # query cell's own neighbourhood is sparse.
+        # Termination is decided *after* consuming the ring, never before -- the
+        # bound covers only cells outside rings 0..ring, not ring itself.
         if best >= 0:
             gap = _ring_gap_m(lat, lon, graph, cx, cy, ring)
             if gap * gap > best_d2:
                 break
         if x_lo <= 0 and y_lo <= 0 and x_hi >= nx - 1 and y_hi >= ny - 1:
-            break  # rings have swallowed the whole grid
+            break
 
     return best
 

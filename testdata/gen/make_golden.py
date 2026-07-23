@@ -5,20 +5,30 @@ assert the committed files are current (what CI and the test suite use).
 
 Both outputs are committed. ``graph.bin`` is written by Python and read by
 TypeScript, so it is the actual interoperability artefact; ``expected.json`` is
-the answer key.
+the answer key. **graph.bin is unchanged by the v1.1 cost-model update** -- the
+graph stores the same fields; only the routing answers in expected.json change.
+
+Cost model (v1.1)
+=================
+
+Each route/field config carries a ``model`` object so TypeScript reconstructs the
+*exact* CostModel:
+
+* ``{"kind": "time", "v_flat_mps", "vam_mps"}`` -- the primary time metric. Both
+  sides compute ``a = 1/v_flat`` from the identical stored value, so costs (in
+  seconds) are bit-identical.
+* ``{"kind": "dist_equiv", "climb_factor"}`` -- the internal fallback, kept in the
+  sweep so the distance-equivalent path stays covered.
 
 Float encoding
 ==============
 
 Costs are asserted for *bit* equality across languages, so the JSON must
-round-trip f64 exactly. It does: Python's ``repr`` and JavaScript's
-``Number.prototype.toString`` both emit the shortest decimal that round-trips to
-the same double, and ``JSON.parse`` recovers it exactly.
+round-trip f64 exactly. Python's ``repr`` and JavaScript's ``Number.toString``
+both emit the shortest round-tripping decimal, and ``JSON.parse`` recovers it.
 
-Two things are deliberately kept out of the JSON. ``Infinity`` is not valid JSON
-and ``JSON.parse`` rejects it, so "no budget" and "no slope limit" are encoded as
-``null``. And unreachable routes are ``{"found": false}`` rather than a cost of
-infinity, because the API returns an absence, not a number.
+``Infinity`` is not valid JSON, so "no budget" / "no slope limit" are ``null`` and
+unreachable routes are ``{"found": false}``.
 """
 
 from __future__ import annotations
@@ -28,6 +38,7 @@ import hashlib
 import json
 import math
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -41,16 +52,43 @@ OUT_DIR = Path(__file__).resolve().parents[2] / "testdata" / "ridge_world"
 GRAPH_PATH = OUT_DIR / "graph.bin"
 EXPECTED_PATH = OUT_DIR / "expected.json"
 
-#: (climb_factor, max_slope_pct or None). The same sweep the Python suite uses,
-#: so a TypeScript failure can be reproduced in Python without translation.
-ROUTE_CONFIGS: list[tuple[float, float | None]] = [
-    (0.0, None),
-    (5.0, None),
-    (60.0, None),
-    (200.0, None),
-    (0.0, 12.0),
-    (20.0, 8.0),
-    (60.0, 6.0),
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """A CostModel plus the JSON that lets TypeScript rebuild it identically."""
+
+    label: str
+    model: rr.CostModel
+    json: dict[str, Any]
+
+
+def _time_spec(profile: rr.Profile) -> ModelSpec:
+    return ModelSpec(
+        label=profile.name,
+        model=profile.model(),
+        json={"kind": "time", "v_flat_mps": profile.v_flat_mps, "vam_mps": profile.vam_mps},
+    )
+
+
+def _dist_spec(climb_factor: float) -> ModelSpec:
+    return ModelSpec(
+        label=f"dist_equiv_{climb_factor:g}",
+        model=rr.CostModel.distance_equiv(climb_factor),
+        json={"kind": "dist_equiv", "climb_factor": climb_factor},
+    )
+
+
+#: The models swept for routes. The three profiles exercise the time metric
+#: across the useful cf range; dist_equiv(0) is pure shortest-path and keeps the
+#: fallback covered.
+ROUTE_MODELS: list[ModelSpec] = [_time_spec(p) for p in rr.PROFILES] + [_dist_spec(0.0)]
+
+#: (ModelSpec, max_slope_pct or None) sweep for routes.
+ROUTE_CONFIGS: list[tuple[ModelSpec, float | None]] = [
+    *[(m, None) for m in ROUTE_MODELS],
+    (_time_spec(rr.PROFILES[1]), 12.0),  # mixed, filtered
+    (_time_spec(rr.PROFILES[0]), 8.0),   # flach, tighter filter
+    (_time_spec(rr.PROFILES[2]), 6.0),   # gebirge, ridge becomes a wall
 ]
 
 
@@ -81,8 +119,6 @@ def _snap_probes(graph: bf.Graph) -> list[tuple[float, float]]:
     mid_lon = (min_lon + max_lon) / 2.0
 
     probes: list[tuple[float, float]] = []
-    # Offsets are irrational-ish fractions so probes never land exactly between
-    # two nodes, which would make the expected answer a tie-break artefact.
     for i in range(17):
         for j in range(13):
             probes.append(
@@ -106,15 +142,16 @@ def _snap_probes(graph: bf.Graph) -> list[tuple[float, float]]:
 
 def _field_configs(
     world: rwmod.RidgeWorld,
-) -> list[tuple[int, float, float | None, float | None]]:
-    """(source, climb_factor, max_slope_pct, max_cost)."""
+) -> list[tuple[ModelSpec, int, float | None, float | None]]:
+    """(model, source, max_slope_pct, max_cost_seconds)."""
+    flach, mixed, gebirge = (_time_spec(p) for p in rr.PROFILES)
     return [
-        (0, 10.0, None, None),
-        (0, 0.0, None, 5000.0),
-        (world.lattice_node(11, 8), 60.0, 8.0, None),
-        (world.lattice_node(11, 8), 0.0, None, 2000.0),
-        (world.bump_b, 25.0, None, None),
-        (world.island[0], 10.0, None, None),
+        (mixed, 0, None, None),
+        (flach, 0, None, 600.0),
+        (gebirge, world.lattice_node(11, 8), 8.0, None),
+        (mixed, world.lattice_node(11, 8), None, 1500.0),
+        (gebirge, world.bump_b, None, None),
+        (mixed, world.island[0], None, None),
     ]
 
 
@@ -124,13 +161,13 @@ def build_expected(world: rwmod.RidgeWorld, graph_bytes: bytes) -> dict[str, Any
 
     routes: list[dict[str, Any]] = []
     for name, src, dst in _route_pairs(world):
-        for climb_factor, max_slope in ROUTE_CONFIGS:
-            result = rr.route(flat, src, dst, climb_factor, max_slope_pct=max_slope)
+        for spec, max_slope in ROUTE_CONFIGS:
+            result = rr.route(flat, src, dst, spec.model, max_slope_pct=max_slope)
             entry: dict[str, Any] = {
                 "name": name,
                 "from": src,
                 "to": dst,
-                "climb_factor": climb_factor,
+                "model": spec.json,
                 "max_slope_pct": max_slope,
             }
             if result is None:
@@ -138,7 +175,7 @@ def build_expected(world: rwmod.RidgeWorld, graph_bytes: bytes) -> dict[str, Any
             else:
                 entry |= {
                     "found": True,
-                    "cost": result.cost,
+                    "cost_s": result.cost,
                     "dist_m": result.dist_m,
                     "ascent_m": result.ascent_m,
                     "descent_m": result.descent_m,
@@ -154,29 +191,29 @@ def build_expected(world: rwmod.RidgeWorld, graph_bytes: bytes) -> dict[str, Any
     ]
 
     fields: list[dict[str, Any]] = []
-    for src, climb_factor, max_slope, max_cost in _field_configs(world):
+    for spec, src, max_slope, max_cost in _field_configs(world):
         field = rr.effort_field(
             flat,
             src,
-            climb_factor,
+            spec.model,
             max_slope_pct=max_slope,
             max_cost=math.inf if max_cost is None else max_cost,
         )
         fields.append(
             {
+                "model": spec.json,
                 "source": src,
-                "climb_factor": climb_factor,
                 "max_slope_pct": max_slope,
-                "max_cost": max_cost,
+                "max_cost_s": max_cost,
                 "edge_count": len(field),
-                # Full dump, not a sample: this is the artefact the frontend
-                # joins onto tiles, so every entry is worth pinning.
-                "entries": [[eid, field[eid]] for eid in sorted(field)],
+                # Full dump, not a sample: this is the artefact the frontend joins
+                # onto tiles, so every (edge_id, time, cum_ascent) triple is pinned.
+                "entries": [[eid, field[eid][0], field[eid][1]] for eid in sorted(field)],
             }
         )
 
     return {
-        "schema": 1,
+        "schema": 2,
         "generator": "testdata/gen/make_golden.py",
         "region_id": graph.region_id,
         "constants": {
@@ -184,7 +221,12 @@ def build_expected(world: rwmod.RidgeWorld, graph_bytes: bytes) -> dict[str, Any
             "h_safety": rr.H_SAFETY,
             "slope_step_pct": bf.SLOPE_STEP_PCT,
             "bump_height_m": rwmod.BUMP_HEIGHT_M,
+            "default_budget_s": rr.DEFAULT_BUDGET_S,
         },
+        "profiles": [
+            {"name": p.name, "v_flat_mps": p.v_flat_mps, "vam_mps": p.vam_mps}
+            for p in rr.PROFILES
+        ],
         "graph": {
             "sha256": hashlib.sha256(graph_bytes).hexdigest(),
             "byte_length": len(graph_bytes),
@@ -212,8 +254,6 @@ def render(world: rwmod.RidgeWorld) -> tuple[bytes, bytes]:
     """Return the exact bytes of ``(graph.bin, expected.json)``."""
     graph_bytes = bf.graph_to_bytes(world.graph)
     expected = build_expected(world, graph_bytes)
-    # allow_nan=False makes a stray Infinity a hard error rather than output that
-    # JSON.parse would reject only once TypeScript tried to read it.
     text = json.dumps(expected, indent=1, sort_keys=True, allow_nan=False) + "\n"
     return graph_bytes, text.encode("utf-8")
 

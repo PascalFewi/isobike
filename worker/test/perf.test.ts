@@ -15,10 +15,13 @@
 import { describe, expect, it } from 'vitest';
 
 import { validateGraph } from '../src/binformat.js';
-import { astar, dijkstra, effortField, snap } from '../src/router.js';
+import { astar, dijkstra, effortField, snap, timeModel } from '../src/router.js';
 import { buildLattice } from './synthetic.js';
 
 const K = 707; // ~500 k nodes, ~2.0 M directed half-edges
+
+// The "mixed" anchor profile: 27 km/h, 700 Hm/h.
+const MODEL = timeModel((27 * 1000) / 3600, 700 / 3600);
 
 describe('nationwide-scale routing', () => {
   const { graph, byteLength } = buildLattice(K);
@@ -44,10 +47,10 @@ describe('nationwide-scale routing', () => {
   });
 
   it('settles the whole graph with Dijkstra in a few hundred milliseconds', () => {
-    dijkstra(graph, centre, 20); // warm up JIT and page in the arrays
+    dijkstra(graph, centre, MODEL); // warm up JIT and page in the arrays
 
     const started = performance.now();
-    const { cost } = dijkstra(graph, centre, 20);
+    const { cost } = dijkstra(graph, centre, MODEL);
     const elapsed = performance.now() - started;
 
     let reached = 0;
@@ -61,10 +64,10 @@ describe('nationwide-scale routing', () => {
   });
 
   it('builds a full effort field in a comparable time', () => {
-    effortField(graph, centre, 20);
+    effortField(graph, centre, MODEL);
 
     const started = performance.now();
-    const field = effortField(graph, centre, 20);
+    const field = effortField(graph, centre, MODEL);
     const elapsed = performance.now() - started;
 
     expect(field.count).toBe(graph.geomEdgeCount);
@@ -77,7 +80,7 @@ describe('nationwide-scale routing', () => {
 
   it('respects a budget by expanding less, not by filtering more', () => {
     const started = performance.now();
-    const field = effortField(graph, centre, 20, { maxCost: 20_000 });
+    const field = effortField(graph, centre, MODEL, { maxCost: 10_000 });
     const elapsed = performance.now() - started;
 
     expect(field.count).toBeGreaterThan(0);
@@ -92,9 +95,9 @@ describe('nationwide-scale routing', () => {
     const from = Math.floor(K * 0.1) * K + Math.floor(K * 0.1);
     const to = Math.floor(K * 0.9) * K + Math.floor(K * 0.9);
 
-    astar(graph, from, to, 20);
+    astar(graph, from, to, MODEL);
     const started = performance.now();
-    const result = astar(graph, from, to, 20);
+    const result = astar(graph, from, to, MODEL);
     const elapsed = performance.now() - started;
 
     expect(result).not.toBeNull();
@@ -106,7 +109,7 @@ describe('nationwide-scale routing', () => {
     expect(elapsed).toBeLessThan(3000);
 
     // And it must still be optimal at this scale, not just fast.
-    const { cost } = dijkstra(graph, from, 20);
+    const { cost } = dijkstra(graph, from, MODEL);
     expect(result!.cost).toBe(cost[to]);
   });
 

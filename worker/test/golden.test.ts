@@ -16,10 +16,23 @@ import { describe, expect, it } from 'vitest';
 import { SLOPE_STEP_PCT } from '../src/binformat.js';
 import { R_EARTH_M } from '../src/geo.js';
 import { H_SAFETY, effortField, route, snap } from '../src/router.js';
-import { loadExpected, loadRidgeWorld, toBudget, toSlopeLimit } from './fixtures.js';
+import {
+  loadExpected,
+  loadRidgeWorld,
+  toBudget,
+  toCostModel,
+  toSlopeLimit,
+  type ModelSpec,
+} from './fixtures.js';
 
 const graph = loadRidgeWorld();
 const expected = loadExpected();
+
+function modelLabel(model: ModelSpec): string {
+  return model.kind === 'time'
+    ? `time(${model.v_flat_mps.toFixed(2)},${model.vam_mps.toFixed(4)})`
+    : `dist(cf=${model.climb_factor})`;
+}
 
 describe('shared constants', () => {
   it('agree with the Python side that generated the golden files', () => {
@@ -30,19 +43,22 @@ describe('shared constants', () => {
 });
 
 describe('routes reproduce the Python reference exactly', () => {
-  it('covers both reachable and unreachable outcomes', () => {
+  it('covers both reachable and unreachable outcomes and both cost models', () => {
     expect(expected.routes.length).toBeGreaterThan(80);
     expect(expected.routes.some((r) => r.found)).toBe(true);
     expect(expected.routes.some((r) => !r.found)).toBe(true);
+    expect(new Set(expected.routes.map((r) => r.model.kind))).toEqual(
+      new Set(['time', 'dist_equiv']),
+    );
   });
 
   for (const want of expected.routes) {
     const label =
       `${want.name} ${want.from}->${want.to} ` +
-      `cf=${want.climb_factor} slope=${want.max_slope_pct ?? 'none'}`;
+      `${modelLabel(want.model)} slope=${want.max_slope_pct ?? 'none'}`;
 
     it(label, () => {
-      const got = route(graph, want.from, want.to, want.climb_factor, {
+      const got = route(graph, want.from, want.to, toCostModel(want.model), {
         maxSlopePct: toSlopeLimit(want.max_slope_pct),
       });
 
@@ -54,8 +70,9 @@ describe('routes reproduce the Python reference exactly', () => {
       expect(got).not.toBeNull();
       const result = got!;
 
-      // Bit-exact, not approximate -- see the file header.
-      expect(result.cost).toBe(want.cost);
+      // Bit-exact, not approximate -- see the file header. cost is seconds under
+      // the time model, distance-equivalent metres under the fallback.
+      expect(result.cost).toBe(want.cost_s);
       expect(result.distM).toBe(want.dist_m);
       expect(result.ascentM).toBe(want.ascent_m);
       expect(result.descentM).toBe(want.descent_m);
@@ -93,27 +110,32 @@ describe('snapping reproduces the Python reference exactly', () => {
 describe('effort fields reproduce the Python reference exactly', () => {
   for (const want of expected.effort_fields) {
     const label =
-      `source=${want.source} cf=${want.climb_factor} ` +
-      `slope=${want.max_slope_pct ?? 'none'} budget=${want.max_cost ?? 'none'}`;
+      `source=${want.source} ${modelLabel(want.model)} ` +
+      `slope=${want.max_slope_pct ?? 'none'} budget=${want.max_cost_s ?? 'none'}`;
 
     it(label, () => {
-      const got = effortField(graph, want.source, want.climb_factor, {
+      const got = effortField(graph, want.source, toCostModel(want.model), {
         maxSlopePct: toSlopeLimit(want.max_slope_pct),
-        maxCost: toBudget(want.max_cost),
+        maxCost: toBudget(want.max_cost_s),
       });
 
       expect(got.count).toBe(want.edge_count);
 
-      // Compare the whole field, entry by entry -- this is the artefact the
-      // frontend joins onto tiles, so a single wrong edge is a visible bug.
+      // Compare the whole field, entry by entry, in *both* channels -- time and
+      // cum_ascent are what the frontend joins onto tiles, so a single wrong edge
+      // in either is a visible bug.
       const mismatches: string[] = [];
-      for (const [edgeId, cost] of want.entries) {
-        const actual = got.cost[edgeId];
-        if (actual !== cost) mismatches.push(`edge ${edgeId}: ${actual} != ${cost}`);
+      for (const [edgeId, time, cumAscent] of want.entries) {
+        if (got.time[edgeId] !== time) {
+          mismatches.push(`edge ${edgeId} time: ${got.time[edgeId]} != ${time}`);
+        }
+        if (got.cumAscent[edgeId] !== cumAscent) {
+          mismatches.push(`edge ${edgeId} cum_ascent: ${got.cumAscent[edgeId]} != ${cumAscent}`);
+        }
       }
       const expectedIds = new Set(want.entries.map(([id]) => id));
-      for (let id = 0; id < got.cost.length; id++) {
-        if (Number.isFinite(got.cost[id]) && !expectedIds.has(id)) {
+      for (let id = 0; id < got.time.length; id++) {
+        if (Number.isFinite(got.time[id]) && !expectedIds.has(id)) {
           mismatches.push(`edge ${id} unexpectedly present`);
         }
       }
@@ -122,7 +144,7 @@ describe('effort fields reproduce the Python reference exactly', () => {
   }
 
   it('excludes the disconnected island from an unbudgeted field', () => {
-    const field = effortField(graph, 0, 10);
+    const field = effortField(graph, 0, toCostModel(expected.effort_fields[0].model));
     const islandEdges = new Set<number>();
     for (const node of expected.fixtures.island) {
       for (let e = graph.csrOffset[node]; e < graph.csrOffset[node + 1]; e++) {
@@ -130,6 +152,6 @@ describe('effort fields reproduce the Python reference exactly', () => {
       }
     }
     expect(islandEdges.size).toBeGreaterThan(0);
-    for (const id of islandEdges) expect(field.cost[id]).toBe(Infinity);
+    for (const id of islandEdges) expect(field.time[id]).toBe(Infinity);
   });
 });

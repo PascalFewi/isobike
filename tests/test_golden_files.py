@@ -69,6 +69,7 @@ def test_expected_json_contains_no_non_finite_literals() -> None:
 def test_expected_json_covers_the_cases_that_matter() -> None:
     expected = json.loads(make_golden.EXPECTED_PATH.read_text(encoding="utf-8"))
 
+    assert expected["schema"] == 2
     assert len(expected["snap"]) > 200
     assert len(expected["routes"]) > 80
     assert len(expected["effort_fields"]) >= 5
@@ -81,9 +82,19 @@ def test_expected_json_covers_the_cases_that_matter() -> None:
     assert any(r["max_slope_pct"] is None for r in expected["routes"])
     assert any(r["max_slope_pct"] is not None for r in expected["routes"])
 
-    # A budgeted and an unbudgeted effort field.
-    assert any(f["max_cost"] is None for f in expected["effort_fields"])
-    assert any(f["max_cost"] is not None for f in expected["effort_fields"])
+    # Both cost models must be represented.
+    kinds = {r["model"]["kind"] for r in expected["routes"]}
+    assert kinds == {"time", "dist_equiv"}
+
+    # A budgeted and an unbudgeted effort field, entries as (edge_id, time, cum_ascent).
+    assert any(f["max_cost_s"] is None for f in expected["effort_fields"])
+    assert any(f["max_cost_s"] is not None for f in expected["effort_fields"])
+    for f in expected["effort_fields"]:
+        assert all(len(entry) == 3 for entry in f["entries"])
+
+    # The three anchor profiles are recorded for the frontend and tests.
+    assert [p["name"] for p in expected["profiles"]] == ["flach", "mixed", "gebirge"]
+    assert expected["constants"]["default_budget_s"] == 8 * 3600
 
     # Probes outside the bbox, where naive snapping goes wrong.
     min_lon, min_lat, max_lon, max_lat = expected["graph"]["bbox"]

@@ -8,23 +8,32 @@
  *
  * Deliberately free of any Worker/Cloudflare dependency: everything here takes a
  * parsed `Graph` and returns plain data, so it is driven directly by vitest. The
- * HTTP layer, R2 loading and the alpha -> climbFactor mapping belong in
- * `index.ts`.
+ * HTTP layer, R2 loading, the `metric` dispatch and the profile -> CostModel
+ * mapping belong in `index.ts`.
+ *
+ * Cost model (spec v1.1)
+ * ======================
+ * The weight of a directed edge is time in seconds, `w = a*dist + b*ascent` with
+ * `a = 1/v_flat`, `b = 1/vam` (see {@link CostModel}). The route minimising time
+ * is identical to the old `dist + cf*ascent` model's, because time is that
+ * expression scaled by the positive constant `1/v_flat`. Steepness is a filter
+ * only, never a cost term. Dijkstra additionally carries, per node and along the
+ * cost-optimal path, cumulative ascent and max slope -- the second colour
+ * channel's raw material, at no extra asymptotic cost.
  *
  * Hot-path rules
  * ==============
  * - No per-node objects. Node state lives in `Float64Array` / `Int32Array` /
  *   `Uint8Array`, indexed by node id.
- * - No `Map` in the search. The effort field builds one only at the end, over
- *   geometric edges, which is a fraction of the node count.
+ * - No `Map` in the search. The effort field builds dense arrays over geometric
+ *   edges, which is a fraction of the node count.
  * - The scan reads `csrOffset`, `edgeTarget`, `edgeDist`, `edgeAscent` and
  *   `edgeMaxSlope` -- five contiguous arrays, which is why the format is
  *   struct-of-arrays.
  *
- * Allocation note: each call allocates its own state arrays (~13 bytes per node,
- * so ~13 MB nationwide). That is correct and simple. If per-request GC pressure
- * shows up in step 2's measurements, the fix is a reusable scratch pool keyed by
- * node count -- not a change to any of the logic here.
+ * Allocation note: each call allocates its own state arrays. That is correct and
+ * simple. If per-request GC pressure shows up in step 2's measurements, the fix
+ * is a reusable scratch pool keyed by node count -- not a change to any logic here.
  */
 
 import { decodeMaxSlope, slopeExceeds, type Graph } from './binformat.js';
@@ -43,16 +52,45 @@ export const H_SAFETY = 1.0 - 2 ** -16;
 /** Sentinel in `incoming`: no predecessor edge. */
 const NO_EDGE = -1;
 
+/**
+ * Linear sum-family edge weight `w = a*dist + b*ascent`.
+ *
+ * For the time metric `a = 1/v_flat` (s/m) and `b = 1/vam` (s/m), so `w` is
+ * seconds. Held as reciprocals, not speeds, because those are what the weight and
+ * heuristic multiply -- and computing them once keeps Python and V8 bit-identical.
+ */
+export interface CostModel {
+  /** seconds per metre of distance = 1 / v_flat */
+  readonly a: number;
+  /** seconds per metre of ascent = 1 / vam */
+  readonly b: number;
+}
+
+/** Time model from a profile's flat speed (m/s) and vertical speed (Hm/s = m/s). */
+export function timeModel(vFlatMps: number, vamMps: number): CostModel {
+  if (vFlatMps <= 0 || vamMps <= 0) throw new Error('v_flat and vam must be positive');
+  return { a: 1 / vFlatMps, b: 1 / vamMps };
+}
+
+/** Internal fallback: `w = dist + climbFactor*ascent` (metres, not seconds). */
+export function distanceEquivModel(climbFactor: number): CostModel {
+  return { a: 1, b: climbFactor };
+}
+
 export interface SearchOptions {
   /** Skip edges whose uphill grade exceeds this, in percent. */
   readonly maxSlopePct?: number | undefined;
-  /** Stop expanding beyond this cost, in flat-equivalent metres. */
+  /** Stop expanding beyond this cost. Seconds under the time model. */
   readonly maxCost?: number | undefined;
 }
 
 export interface DijkstraResult {
-  /** Cost per node; `Infinity` where unreached. */
+  /** Cost per node; `Infinity` where unreached. Seconds under the time model. */
   readonly cost: Float64Array;
+  /** Cumulative ascent along the cost-optimal path to each node, in metres. */
+  readonly cumAscent: Float64Array;
+  /** Max slope (stored u8) along the cost-optimal path to each node. */
+  readonly maxSlope: Uint8Array;
   /** Directed half-edge used to reach each node, or -1. */
   readonly incoming: Int32Array;
 }
@@ -61,6 +99,7 @@ export interface RouteResult {
   readonly nodes: number[];
   /** Geometric edge ids, in travel order -- what `/route` returns. */
   readonly edgeIds: number[];
+  /** Optimisation cost of the path -- seconds under the time model. */
   readonly cost: number;
   readonly distM: number;
   readonly ascentM: number;
@@ -68,9 +107,9 @@ export interface RouteResult {
   readonly maxSlopePct: number;
 }
 
-/** `w = dist + climbFactor * ascent`, the spec's cost model, in f64. */
-export function edgeWeight(graph: Graph, edge: number, climbFactor: number): number {
-  return graph.edgeDist[edge] + climbFactor * graph.edgeAscent[edge];
+/** `w = a*dist + b*ascent` in f64 -- seconds under the time model. */
+export function edgeWeight(graph: Graph, edge: number, model: CostModel): number {
+  return model.a * graph.edgeDist[edge] + model.b * graph.edgeAscent[edge];
 }
 
 function blocked(graph: Graph, edge: number, maxSlopePct: number | undefined): boolean {
@@ -84,13 +123,15 @@ function blocked(graph: Graph, edge: number, maxSlopePct: number | undefined): b
 export function dijkstra(
   graph: Graph,
   source: number,
-  climbFactor: number,
+  model: CostModel,
   options: SearchOptions = {},
 ): DijkstraResult {
   const { maxSlopePct, maxCost = Infinity } = options;
   const n = graph.nodeCount;
 
   const cost = new Float64Array(n).fill(Infinity);
+  const cumAscent = new Float64Array(n);
+  const maxSlope = new Uint8Array(n);
   const incoming = new Int32Array(n).fill(NO_EDGE);
   const settled = new Uint8Array(n);
 
@@ -106,23 +147,29 @@ export function dijkstra(
     settled[u] = 1;
 
     const c = heap.topKey;
+    const cuAscent = cumAscent[u];
+    const cuSlope = maxSlope[u];
     const end = graph.csrOffset[u + 1];
     for (let e = graph.csrOffset[u]; e < end; e++) {
       if (blocked(graph, e, maxSlopePct)) continue;
       const v = graph.edgeTarget[e];
       if (settled[v] === 1) continue;
-      const nc = c + edgeWeight(graph, e, climbFactor);
+      const nc = c + edgeWeight(graph, e, model);
       // Strict `<`: the first predecessor to achieve a cost keeps it, matching
       // the reference router's tie resolution.
       if (nc < cost[v]) {
         cost[v] = nc;
+        // Accumulate the secondary quantities along this same optimal edge.
+        cumAscent[v] = cuAscent + graph.edgeAscent[e];
+        const s = graph.edgeMaxSlope[e];
+        maxSlope[v] = cuSlope >= s ? cuSlope : s;
         incoming[v] = e;
         heap.push(nc, v);
       }
     }
   }
 
-  return { cost, incoming };
+  return { cost, cumAscent, maxSlope, incoming };
 }
 
 // --------------------------------------------------------------------------- //
@@ -130,17 +177,16 @@ export function dijkstra(
 // --------------------------------------------------------------------------- //
 
 /**
- * Admissible lower bound on the cost from `node` to `goal`.
+ * Admissible lower bound on the time from `node` to `goal`.
  *
  * `sum(dist) >= great-circle` because a polyline obeys the triangle inequality on
  * a sphere (enforced on the stored data by `validateGraph`'s edge-length check),
- * and `sum(ascent) >= max(0, net gain)` because descent is never negative. The
- * sum of two independent lower bounds is a lower bound.
- *
- * Still admissible under a slope filter: removing edges can only raise the true
- * remaining cost, and h does not change.
+ * and `sum(ascent) >= max(0, net gain)` because descent is never negative. Scaled
+ * into seconds by the model; the sum of two independent lower bounds is a lower
+ * bound. Still admissible under a slope filter: removing edges can only raise the
+ * true remaining cost, and h does not change.
  */
-export function heuristic(graph: Graph, node: number, goal: number, climbFactor: number): number {
+export function heuristic(graph: Graph, node: number, goal: number, model: CostModel): number {
   const line = haversineM(
     graph.nodeLat[node],
     graph.nodeLon[node],
@@ -148,14 +194,14 @@ export function heuristic(graph: Graph, node: number, goal: number, climbFactor:
     graph.nodeLon[goal],
   );
   const climb = Math.max(0, graph.nodeElev[goal] - graph.nodeElev[node]);
-  return H_SAFETY * (line + climbFactor * climb);
+  return H_SAFETY * (model.a * line + model.b * climb);
 }
 
 export function astar(
   graph: Graph,
   source: number,
   goal: number,
-  climbFactor: number,
+  model: CostModel,
   options: SearchOptions = {},
 ): RouteResult | null {
   const { maxSlopePct } = options;
@@ -168,13 +214,12 @@ export function astar(
   // h is a pure function of the node, but relaxation reaches a node once per
   // incoming edge -- four times over on a lattice. Memoising turns the only
   // transcendental call in the search into at most one per node. NaN is the
-  // "not yet computed" marker because every real value here is finite and
-  // non-negative, so it cannot collide with a legitimate result.
+  // "not yet computed" marker because every real value here is finite.
   const hCache = new Float64Array(n).fill(NaN);
   const h = (node: number): number => {
     const cached = hCache[node];
     if (cached === cached) return cached; // NaN is the only value !== itself
-    const value = heuristic(graph, node, goal, climbFactor);
+    const value = heuristic(graph, node, goal, model);
     hCache[node] = value;
     return value;
   };
@@ -195,7 +240,7 @@ export function astar(
       if (blocked(graph, e, maxSlopePct)) continue;
       const v = graph.edgeTarget[e];
       if (settled[v] === 1) continue;
-      const nc = cu + edgeWeight(graph, e, climbFactor);
+      const nc = cu + edgeWeight(graph, e, model);
       if (nc < gCost[v]) {
         gCost[v] = nc;
         incoming[v] = e;
@@ -282,10 +327,10 @@ export function route(
   graph: Graph,
   source: number,
   goal: number,
-  climbFactor: number,
+  model: CostModel,
   options: SearchOptions = {},
 ): RouteResult | null {
-  const { cost, incoming } = dijkstra(graph, source, climbFactor, options);
+  const { cost, incoming } = dijkstra(graph, source, model, options);
   if (!Number.isFinite(cost[goal])) return null;
   return buildRoute(graph, source, goal, cost, incoming);
 }
@@ -294,61 +339,75 @@ export function route(
 // Effort field
 // --------------------------------------------------------------------------- //
 
-/**
- * `edgeId -> effort to reach that edge`, over the whole reachable field.
- *
- * Per decision D2 an edge's cost is `min(cost[u], cost[v])` -- the effort to
- * *reach* it, which is the isochrone convention. `max(...)` would mean "effort to
- * have fully traversed it" and would make the frontier look artificially
- * expensive on the long edges that degree-2 collapse produces.
- *
- * A geometric edge is omitted when both halves are removed by the slope filter:
- * colouring a road the rider is filtering out would misreport reach.
- */
 export interface EffortField {
-  /** Indexed by `edgeId`; `Infinity` where the edge is unreachable or filtered. */
-  readonly cost: Float64Array;
-  /** How many entries are finite. */
+  /** Reach time per `edgeId`; `Infinity` where unreachable or filtered. Seconds. */
+  readonly time: Float64Array;
+  /** Cumulative ascent at the same (cheaper) endpoint, in metres; 0 where absent. */
+  readonly cumAscent: Float64Array;
+  /** How many edges are finite. */
   readonly count: number;
 }
 
+/**
+ * `edgeId -> (time, cumAscent)`, over the whole reachable field.
+ *
+ * Per decision D2 an edge's reach `time` is `min(cost[u], cost[v])` -- the effort
+ * to *reach* it, the isochrone convention. `cumAscent` is taken at the *same*
+ * (cheaper) endpoint, so time and climb refer to one consistent journey. On a
+ * cost tie the endpoint with the smaller cumAscent wins (lexicographic minimum on
+ * `(time, cumAscent)`), which is deterministic and identical across languages
+ * because both halves of a geometric edge evaluate the same two endpoints.
+ *
+ * A geometric edge is omitted when both halves are removed by the slope filter,
+ * or when it is unreachable: colouring a road the rider is filtering out, or
+ * cannot reach, would misreport reach.
+ */
 export function effortField(
   graph: Graph,
   source: number,
-  climbFactor: number,
+  model: CostModel,
   options: SearchOptions = {},
 ): EffortField {
   const { maxSlopePct, maxCost = Infinity } = options;
-  const { cost } = dijkstra(graph, source, climbFactor, options);
+  const { cost, cumAscent } = dijkstra(graph, source, model, options);
 
-  // Dense array rather than a Map. The field spans up to every geometric edge,
-  // and a Map costs a hash per lookup *and* per insert across ~2 M half-edge
-  // visits -- measured at 1.37 s on top of a 194 ms Dijkstra, i.e. the container
-  // cost seven times the search. A Float64Array indexed by edgeId is one bounds
-  // check, and it is already the shape the binary response wants.
-  const field = new Float64Array(graph.geomEdgeCount).fill(Infinity);
+  // Dense arrays rather than a Map. The field spans up to every geometric edge,
+  // and a Map costs a hash per lookup and per insert across ~2 M half-edge
+  // visits. Two Float64Arrays indexed by edgeId are one bounds check, and they
+  // are already the shape the binary (edge_id, time, cum_ascent) response wants.
+  const time = new Float64Array(graph.geomEdgeCount).fill(Infinity);
+  const climb = new Float64Array(graph.geomEdgeCount);
   let count = 0;
 
   for (let u = 0; u < graph.nodeCount; u++) {
     const end = graph.csrOffset[u + 1];
     for (let e = graph.csrOffset[u]; e < end; e++) {
       if (blocked(graph, e, maxSlopePct)) continue;
-      const cu = cost[u];
-      const cv = cost[graph.edgeTarget[e]];
-      const reach = cu < cv ? cu : cv;
-      // `reach > maxCost` alone does not exclude unreachable edges: with an
-      // infinite budget, `Infinity > Infinity` is false and the entire
-      // disconnected component would be emitted at cost Infinity.
-      if (!Number.isFinite(reach) || reach > maxCost) continue;
+      const v = graph.edgeTarget[e];
+      let t: number;
+      let asc: number;
+      if (cost[u] <= cost[v]) {
+        t = cost[u];
+        asc = cumAscent[u];
+      } else {
+        t = cost[v];
+        asc = cumAscent[v];
+      }
+      // `t > maxCost` alone does not exclude unreachable edges: with an infinite
+      // budget, `Infinity > Infinity` is false and the whole disconnected
+      // component would leak in at cost Infinity.
+      if (!Number.isFinite(t) || t > maxCost) continue;
       const id = graph.edgeId[e];
-      const existing = field[id];
-      if (reach < existing) {
+      const existing = time[id];
+      // Lexicographic minimum on (time, cumAscent).
+      if (t < existing || (t === existing && asc < climb[id])) {
         if (existing === Infinity) count++;
-        field[id] = reach;
+        time[id] = t;
+        climb[id] = asc;
       }
     }
   }
-  return { cost: field, count };
+  return { time, cumAscent: climb, count };
 }
 
 // --------------------------------------------------------------------------- //

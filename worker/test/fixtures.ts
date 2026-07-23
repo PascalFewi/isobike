@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { readGraph, type Graph } from '../src/binformat.js';
+import { distanceEquivModel, timeModel, type CostModel } from '../src/router.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const TESTDATA_DIR = join(HERE, '..', '..', 'testdata', 'ridge_world');
@@ -32,14 +33,28 @@ export function loadRidgeWorld(): Graph {
 // expected.json
 // --------------------------------------------------------------------------- //
 
+/**
+ * The `model` object each route/field config carries, so the test rebuilds the
+ * exact CostModel Python used.
+ */
+export type ModelSpec =
+  | { readonly kind: 'time'; readonly v_flat_mps: number; readonly vam_mps: number }
+  | { readonly kind: 'dist_equiv'; readonly climb_factor: number };
+
+export function toCostModel(spec: ModelSpec): CostModel {
+  return spec.kind === 'time'
+    ? timeModel(spec.v_flat_mps, spec.vam_mps)
+    : distanceEquivModel(spec.climb_factor);
+}
+
 export interface ExpectedRoute {
   readonly name: string;
   readonly from: number;
   readonly to: number;
-  readonly climb_factor: number;
+  readonly model: ModelSpec;
   readonly max_slope_pct: number | null;
   readonly found: boolean;
-  readonly cost?: number;
+  readonly cost_s?: number;
   readonly dist_m?: number;
   readonly ascent_m?: number;
   readonly descent_m?: number;
@@ -49,12 +64,19 @@ export interface ExpectedRoute {
 }
 
 export interface ExpectedField {
+  readonly model: ModelSpec;
   readonly source: number;
-  readonly climb_factor: number;
   readonly max_slope_pct: number | null;
-  readonly max_cost: number | null;
+  readonly max_cost_s: number | null;
   readonly edge_count: number;
-  readonly entries: ReadonlyArray<readonly [number, number]>;
+  /** [edge_id, time_s, cum_ascent_m] */
+  readonly entries: ReadonlyArray<readonly [number, number, number]>;
+}
+
+export interface ExpectedProfile {
+  readonly name: string;
+  readonly v_flat_mps: number;
+  readonly vam_mps: number;
 }
 
 export interface Expected {
@@ -65,7 +87,9 @@ export interface Expected {
     readonly h_safety: number;
     readonly slope_step_pct: number;
     readonly bump_height_m: number;
+    readonly default_budget_s: number;
   };
+  readonly profiles: readonly ExpectedProfile[];
   readonly graph: {
     readonly sha256: string;
     readonly byte_length: number;
@@ -100,3 +124,5 @@ export function toSlopeLimit(value: number | null): number | undefined {
 export function toBudget(value: number | null): number {
   return value === null ? Infinity : value;
 }
+
+export type { CostModel };
