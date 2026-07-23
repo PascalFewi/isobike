@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Build pipeline artefacts (resumable cache + outputs; never committed)
+build/cache/
+build/out/
+
+# Node
+node_modules/
+dist/
+.wrangler/
+
+# Editors / OS
+.DS_Store
+*.swp
+
+# NOTE: testdata/ridge_world/*.bin and *.json ARE committed on purpose.
+# They are the cross-language golden files; see testdata/README.md.

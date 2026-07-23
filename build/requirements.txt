@@ -1,0 +1,9 @@
+# Step 1 (binary format + test-data generation) needs only numpy.
+numpy>=1.26,<3
+
+# Dev
+pytest>=8.0
+
+# Added at step 3 (OSM + DEM pipeline), deliberately not installed yet so that a
+# fresh checkout can run the step-1 test suite without pulling GDAL/PROJ wheels:
+#   pyrosm, rasterio, shapely, pyproj, requests

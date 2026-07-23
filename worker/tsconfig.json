@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022"],
+    "types": ["node"],
+
+    "strict": true,
+    "noImplicitOverride": true,
+    "exactOptionalPropertyTypes": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    // Deliberately OFF. TypedArray has a numeric index signature, so this flag
+    // widens every `edgeDist[i]` in the routing hot path to `number | undefined`
+    // and forces a `!` on each read. That trades a real safety property (which
+    // typed arrays do not have -- an in-bounds read is always a number) for
+    // noise that obscures the code. Bounds are instead validated once, up front,
+    // in readGraph(); after that every index in the router is provably in range.
+    "noUncheckedIndexedAccess": false,
+
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "*.config.ts"]
+}

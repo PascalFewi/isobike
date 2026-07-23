@@ -1,0 +1,15 @@
+[project]
+name = "velorouter-build"
+version = "0.1.0"
+description = "VeloRouter build pipeline and cross-language test-data generator"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Keep the default run fast enough to be worth running on every edit. The
+# exhaustive all-pairs sweeps are opt-in via `-m slow`, because a naive
+# reference router over every node pair takes minutes, not seconds.
+addopts = "-m 'not slow' --strict-markers"
+markers = [
+    "slow: exhaustive sweeps; run with `pytest -m slow`",
+]
