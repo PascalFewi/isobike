@@ -1,0 +1,30 @@
+# Cloudflare Worker config for VeloRouter.
+#
+# Requires Workers **Paid**: the nationwide Dijkstra runs a few hundred ms, which
+# is far past the Free tier's 10 ms CPU cap. Paid allows up to 5 min. The graph is
+# ~60 MB in typed arrays, inside the 128 MB isolate memory (not user-configurable;
+# 128 MB is the standard limit). The Worker uses only Web APIs, so no
+# nodejs_compat flag is needed.
+
+name = "velorouter-worker"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# Cap runaway CPU well above the real workload (~200 ms full-graph Dijkstra,
+# ~250 ms full effort field) and well below the 5 min ceiling. CPU is billed by
+# actual use, not by this limit.
+[limits]
+cpu_ms = 30000
+
+# R2 binding holding graph.bin. Create the bucket once (see the worker README).
+# For `wrangler dev` (local), the object is seeded into the local R2 simulation;
+# for a deployed Worker it reads the real bucket.
+[[r2_buckets]]
+binding = "GRAPH_BUCKET"
+bucket_name = "velorouter-graph"
+preview_bucket_name = "velorouter-graph-dev"
+
+[vars]
+# Object key within the bucket. Europe sharding later can point this per-Worker
+# at "ch/graph.bin", "at/graph.bin", ... without a code change.
+GRAPH_KEY = "graph.bin"
