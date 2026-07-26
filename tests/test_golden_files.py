@@ -69,7 +69,8 @@ def test_expected_json_contains_no_non_finite_literals() -> None:
 def test_expected_json_covers_the_cases_that_matter() -> None:
     expected = json.loads(make_golden.EXPECTED_PATH.read_text(encoding="utf-8"))
 
-    assert expected["schema"] == 2
+    assert expected["schema"] == 3
+    assert expected["graph"]["format_version"] == 2
     assert len(expected["snap"]) > 200
     assert len(expected["routes"]) > 80
     assert len(expected["effort_fields"]) >= 5
@@ -95,6 +96,16 @@ def test_expected_json_covers_the_cases_that_matter() -> None:
     # The three anchor profiles are recorded for the frontend and tests.
     assert [p["name"] for p in expected["profiles"]] == ["flach", "mixed", "gebirge"]
     assert expected["constants"]["default_budget_s"] == 8 * 3600
+
+    # Surface (v2): the enum, a histogram with all four classes present, and both
+    # surface-filtered and unfiltered routes/fields.
+    assert expected["surface_classes"] == {"unknown": 0, "paved": 1, "gravel": 2, "unpaved": 3}
+    hist = expected["graph"]["surface_histogram"]
+    assert all(hist[k] > 0 for k in ("paved", "gravel", "unpaved"))
+    assert sum(hist.values()) == expected["graph"]["geom_edge_count"]
+    assert any(r["surfaces"] is not None for r in expected["routes"])
+    assert any(r["surfaces"] is None for r in expected["routes"])
+    assert any(f["surfaces"] is not None for f in expected["effort_fields"])
 
     # Probes outside the bbox, where naive snapping goes wrong.
     min_lon, min_lat, max_lon, max_lat = expected["graph"]["bbox"]

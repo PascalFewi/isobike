@@ -1,0 +1,13 @@
+# Step-3 build-pipeline dependencies (OSM + DEM). Not needed to run the unit
+# suite -- see build/requirements.txt. Install these only on the machine that
+# runs `python build/build_graph.py`.
+-r requirements.txt
+
+pyrosm>=0.6          # OSM PBF -> network (bundles a PBF reader)
+rasterio>=1.3        # DEM raster sampling (ships GDAL wheels)
+shapely>=2.0         # geometry ops (Douglas-Peucker, degree-2 collapse)
+pyproj>=3.6          # CRS transforms (swissALTI3D LV95 <-> WGS84)
+requests>=2.31       # swisstopo STAC API + tile download
+
+# Also required, installed outside pip (C++ tool):
+#   tippecanoe  -- GeoJSON -> PMTiles. In WSL: sudo apt install tippecanoe

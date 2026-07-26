@@ -114,9 +114,14 @@ export function buildLattice(k: number): SyntheticGraph {
   const gridNodeId = new Uint32Array(nodeCount);
   for (let n = 0; n < nodeCount; n++) gridNodeId[fill[cellOf[n]]++] = n;
 
+  // Per-geometric surface, cycling paved/gravel/unpaved (1/2/3) so a filtered
+  // search has a realistic mix to include or exclude.
+  const edgeSurface = new Uint8Array(geomEdgeCount);
+  for (let id = 0; id < geomEdgeCount; id++) edgeSurface[id] = 1 + (id % 3);
+
   const graph: Graph = {
     regionId: 'synthetic',
-    formatVersion: 1,
+    formatVersion: 2,
     bbox: [minLon, minLat, maxLon, maxLat],
     gridNx,
     gridNy,
@@ -128,14 +133,15 @@ export function buildLattice(k: number): SyntheticGraph {
     nodeLat, nodeLon, nodeElev,
     csrOffset,
     edgeTarget, edgeId, edgeDist, edgeAscent, edgeDescent, edgeMaxSlope,
-    gridOffset, gridNodeId,
+    gridOffset, gridNodeId, edgeSurface,
   };
 
   const byteLength =
     nodeLat.byteLength + nodeLon.byteLength + nodeElev.byteLength +
     csrOffset.byteLength + edgeTarget.byteLength + edgeId.byteLength +
     edgeDist.byteLength + edgeAscent.byteLength + edgeDescent.byteLength +
-    edgeMaxSlope.byteLength + gridOffset.byteLength + gridNodeId.byteLength;
+    edgeMaxSlope.byteLength + gridOffset.byteLength + gridNodeId.byteLength +
+    edgeSurface.byteLength;
 
   return { graph, byteLength };
 }

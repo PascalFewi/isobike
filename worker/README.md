@@ -8,7 +8,7 @@ fully-tested modules; this deployable is a thin shell over them.
 
 | file | role |
 |---|---|
-| `src/binformat.ts` | zero-copy `graph.bin` reader (mirrors `build/binformat.py`) |
+| `src/binformat.ts` | zero-copy `graph.bin` reader v2 (mirrors `build/binformat.py`) |
 | `src/geo.ts`, `src/heap.ts` | geodesy + array binary heap |
 | `src/router.ts` | Dijkstra / A* / effort-field / snap, over flat typed arrays |
 | `src/protocol.ts` | request parsing, cost-model resolution, binary response |
@@ -28,9 +28,12 @@ future bottleneck `minimax` can be added without an API break.
 ### `POST /effort-field`
 ```json
 { "lat": 46.9, "lon": 7.45, "v_flat": 7.5, "vam": 0.194,
-  "max_slope": 10, "max_cost": 28800, "metric": "time" }
+  "max_slope": 10, "surfaces": [1, 2], "max_cost": 28800, "metric": "time" }
 ```
-`max_cost` in seconds (default 8 h). Response is **binary**, little-endian: a
+`max_cost` in seconds (default 8 h). `surfaces` (optional) is a non-empty list of
+allowed surface class ids — `0=unknown, 1=paved, 2=gravel, 3=unpaved` — that
+restricts routing to those surfaces (road-vs-gravel). Response is **binary**,
+little-endian: a
 32-byte header (`magic "VEFF"`, version, count, snapped node + its lat/lon, max
 time, max cum_ascent) then three parallel arrays — `edge_id u32[]`, `time f32[]`,
 `cum_ascent f32[]`. Struct-of-arrays so the client makes zero-copy typed views.

@@ -22,7 +22,14 @@ import {
   resolveMetric,
   serializeEffortField,
 } from '../src/protocol.js';
-import { loadExpected, loadRidgeWorld, toBudget, toCostModel, toSlopeLimit } from './fixtures.js';
+import {
+  loadExpected,
+  loadRidgeWorld,
+  toBudget,
+  toCostModel,
+  toSlopeLimit,
+  toSurfaces,
+} from './fixtures.js';
 
 const graph = loadRidgeWorld();
 const expected = loadExpected();
@@ -38,6 +45,7 @@ describe('effort-field serialization', () => {
     for (const want of expected.effort_fields) {
       const field = effortField(graph, want.source, toCostModel(want.model), {
         maxSlopePct: toSlopeLimit(want.max_slope_pct),
+        allowedSurfaces: toSurfaces(want.surfaces),
         maxCost: toBudget(want.max_cost_s),
       });
       const buffer = serializeEffortField(graph, want.source, field);

@@ -78,17 +78,30 @@ def _dist_spec(climb_factor: float) -> ModelSpec:
     )
 
 
+_PAVED = int(bf.Surface.PAVED)
+_GRAVEL = int(bf.Surface.GRAVEL)
+_UNPAVED = int(bf.Surface.UNPAVED)
+_UNKNOWN = int(bf.Surface.UNKNOWN)
+
+
+def _surface_set(surfaces: list[int] | None) -> frozenset[int] | None:
+    return None if surfaces is None else frozenset(surfaces)
+
+
 #: The models swept for routes. The three profiles exercise the time metric
 #: across the useful cf range; dist_equiv(0) is pure shortest-path and keeps the
 #: fallback covered.
 ROUTE_MODELS: list[ModelSpec] = [_time_spec(p) for p in rr.PROFILES] + [_dist_spec(0.0)]
 
-#: (ModelSpec, max_slope_pct or None) sweep for routes.
-ROUTE_CONFIGS: list[tuple[ModelSpec, float | None]] = [
-    *[(m, None) for m in ROUTE_MODELS],
-    (_time_spec(rr.PROFILES[1]), 12.0),  # mixed, filtered
-    (_time_spec(rr.PROFILES[0]), 8.0),   # flach, tighter filter
-    (_time_spec(rr.PROFILES[2]), 6.0),   # gebirge, ridge becomes a wall
+#: (ModelSpec, max_slope_pct or None, allowed surfaces or None) sweep for routes.
+ROUTE_CONFIGS: list[tuple[ModelSpec, float | None, list[int] | None]] = [
+    *[(m, None, None) for m in ROUTE_MODELS],
+    (_time_spec(rr.PROFILES[1]), 12.0, None),  # mixed, slope-filtered
+    (_time_spec(rr.PROFILES[0]), 8.0, None),   # flach, tighter slope filter
+    (_time_spec(rr.PROFILES[2]), 6.0, None),   # gebirge, ridge becomes a wall
+    (_time_spec(rr.PROFILES[1]), None, [_PAVED]),  # paved-only: ridge unreachable
+    (_time_spec(rr.PROFILES[2]), None, [_PAVED, _GRAVEL]),  # gravel bike, no rough paths
+    (_time_spec(rr.PROFILES[1]), None, [_PAVED, _GRAVEL, _UNKNOWN]),  # everything but unpaved
 ]
 
 
@@ -142,16 +155,18 @@ def _snap_probes(graph: bf.Graph) -> list[tuple[float, float]]:
 
 def _field_configs(
     world: rwmod.RidgeWorld,
-) -> list[tuple[ModelSpec, int, float | None, float | None]]:
-    """(model, source, max_slope_pct, max_cost_seconds)."""
+) -> list[tuple[ModelSpec, int, float | None, float | None, list[int] | None]]:
+    """(model, source, max_slope_pct, max_cost_seconds, allowed surfaces)."""
     flach, mixed, gebirge = (_time_spec(p) for p in rr.PROFILES)
     return [
-        (mixed, 0, None, None),
-        (flach, 0, None, 600.0),
-        (gebirge, world.lattice_node(11, 8), 8.0, None),
-        (mixed, world.lattice_node(11, 8), None, 1500.0),
-        (gebirge, world.bump_b, None, None),
-        (mixed, world.island[0], None, None),
+        (mixed, 0, None, None, None),
+        (flach, 0, None, 600.0, None),
+        (gebirge, world.lattice_node(11, 8), 8.0, None, None),
+        (mixed, world.lattice_node(11, 8), None, 1500.0, None),
+        (gebirge, world.bump_b, None, None, None),
+        (mixed, world.island[0], None, None, None),
+        (mixed, 0, None, None, [_PAVED]),  # paved-only field: a valley subset
+        (gebirge, 0, None, None, [_PAVED, _GRAVEL]),  # gravel-bike field
     ]
 
 
@@ -161,14 +176,22 @@ def build_expected(world: rwmod.RidgeWorld, graph_bytes: bytes) -> dict[str, Any
 
     routes: list[dict[str, Any]] = []
     for name, src, dst in _route_pairs(world):
-        for spec, max_slope in ROUTE_CONFIGS:
-            result = rr.route(flat, src, dst, spec.model, max_slope_pct=max_slope)
+        for spec, max_slope, surfaces in ROUTE_CONFIGS:
+            result = rr.route(
+                flat,
+                src,
+                dst,
+                spec.model,
+                max_slope_pct=max_slope,
+                allowed_surfaces=_surface_set(surfaces),
+            )
             entry: dict[str, Any] = {
                 "name": name,
                 "from": src,
                 "to": dst,
                 "model": spec.json,
                 "max_slope_pct": max_slope,
+                "surfaces": surfaces,
             }
             if result is None:
                 entry["found"] = False
@@ -191,12 +214,13 @@ def build_expected(world: rwmod.RidgeWorld, graph_bytes: bytes) -> dict[str, Any
     ]
 
     fields: list[dict[str, Any]] = []
-    for spec, src, max_slope, max_cost in _field_configs(world):
+    for spec, src, max_slope, max_cost, surfaces in _field_configs(world):
         field = rr.effort_field(
             flat,
             src,
             spec.model,
             max_slope_pct=max_slope,
+            allowed_surfaces=_surface_set(surfaces),
             max_cost=math.inf if max_cost is None else max_cost,
         )
         fields.append(
@@ -205,6 +229,7 @@ def build_expected(world: rwmod.RidgeWorld, graph_bytes: bytes) -> dict[str, Any
                 "source": src,
                 "max_slope_pct": max_slope,
                 "max_cost_s": max_cost,
+                "surfaces": surfaces,
                 "edge_count": len(field),
                 # Full dump, not a sample: this is the artefact the frontend joins
                 # onto tiles, so every (edge_id, time, cum_ascent) triple is pinned.
@@ -212,8 +237,12 @@ def build_expected(world: rwmod.RidgeWorld, graph_bytes: bytes) -> dict[str, Any
             }
         )
 
+    # Class -> count over the whole graph; a TS test asserts it read the
+    # edge_surface section correctly (beyond the sha256 byte match).
+    surface_hist = {s.name.lower(): int((graph.edge_surface == int(s)).sum()) for s in bf.Surface}
+
     return {
-        "schema": 2,
+        "schema": 3,
         "generator": "testdata/gen/make_golden.py",
         "region_id": graph.region_id,
         "constants": {
@@ -223,6 +252,7 @@ def build_expected(world: rwmod.RidgeWorld, graph_bytes: bytes) -> dict[str, Any
             "bump_height_m": rwmod.BUMP_HEIGHT_M,
             "default_budget_s": rr.DEFAULT_BUDGET_S,
         },
+        "surface_classes": {s.name.lower(): int(s) for s in bf.Surface},
         "profiles": [
             {"name": p.name, "v_flat_mps": p.v_flat_mps, "vam_mps": p.vam_mps}
             for p in rr.PROFILES
@@ -237,6 +267,7 @@ def build_expected(world: rwmod.RidgeWorld, graph_bytes: bytes) -> dict[str, Any
             "grid_nx": graph.grid_nx,
             "grid_ny": graph.grid_ny,
             "bbox": list(graph.bbox),
+            "surface_histogram": surface_hist,
         },
         "fixtures": {
             "bump_anchor": world.bump_anchor,

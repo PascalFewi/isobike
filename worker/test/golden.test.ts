@@ -22,8 +22,10 @@ import {
   toBudget,
   toCostModel,
   toSlopeLimit,
+  toSurfaces,
   type ModelSpec,
 } from './fixtures.js';
+import { Surface } from '../src/binformat.js';
 
 const graph = loadRidgeWorld();
 const expected = loadExpected();
@@ -39,6 +41,29 @@ describe('shared constants', () => {
     expect(R_EARTH_M).toBe(expected.constants.r_earth_m);
     expect(H_SAFETY).toBe(expected.constants.h_safety);
     expect(SLOPE_STEP_PCT).toBe(expected.constants.slope_step_pct);
+  });
+});
+
+describe('edge_surface (format v2)', () => {
+  it('reads the Surface enum the same way Python wrote it', () => {
+    expect(expected.surface_classes).toEqual({
+      unknown: Surface.Unknown,
+      paved: Surface.Paved,
+      gravel: Surface.Gravel,
+      unpaved: Surface.Unpaved,
+    });
+  });
+
+  it('reproduces the per-class edge histogram from the graph.bin section', () => {
+    const hist: Record<string, number> = { unknown: 0, paved: 0, gravel: 0, unpaved: 0 };
+    const name = ['unknown', 'paved', 'gravel', 'unpaved'];
+    for (let id = 0; id < graph.geomEdgeCount; id++) hist[name[graph.edgeSurface[id]]]++;
+    expect(hist).toEqual(expected.graph.surface_histogram);
+  });
+
+  it('exposes edge_surface as a zero-copy view of length G', () => {
+    expect(graph.edgeSurface.length).toBe(graph.geomEdgeCount);
+    expect(graph.edgeSurface.buffer).toBe(graph.edgeId.buffer);
   });
 });
 
@@ -60,6 +85,7 @@ describe('routes reproduce the Python reference exactly', () => {
     it(label, () => {
       const got = route(graph, want.from, want.to, toCostModel(want.model), {
         maxSlopePct: toSlopeLimit(want.max_slope_pct),
+        allowedSurfaces: toSurfaces(want.surfaces),
       });
 
       if (!want.found) {
@@ -116,6 +142,7 @@ describe('effort fields reproduce the Python reference exactly', () => {
     it(label, () => {
       const got = effortField(graph, want.source, toCostModel(want.model), {
         maxSlopePct: toSlopeLimit(want.max_slope_pct),
+        allowedSurfaces: toSurfaces(want.surfaces),
         maxCost: toBudget(want.max_cost_s),
       });
 

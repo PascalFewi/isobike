@@ -46,6 +46,7 @@ spacing jitter, plus three injected fixtures.
 | **island** (3 nodes) | unreachable routes and effort-field truncation, placed *inside* the bbox so it also tests that snapping can legitimately land on a dead component |
 | **47 % empty grid cells** | the ring search must expand across holes; a naive 3×3 probe passes in dense terrain and fails exactly at borders and gaps |
 | quadratic spacing jitter | a linear jitter like `(i*37) % 11` has only two distinct consecutive differences, so paths tie constantly and a path assertion tests the tie-break rather than the routing |
+| **terrain-tied surface** (v2) | valleys paved, mid-slopes gravel, the high ridge unpaved; the bump approach left `unknown`. All four `Surface` classes appear, and a paved-only filter walls off the gravel ridge exactly as a road cyclist avoiding gravel would be — so the surface filter reroutes/disconnects, not just trims |
 
 ## Why costs are compared bit-exactly
 

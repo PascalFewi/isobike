@@ -384,6 +384,31 @@ def build_ridge_world() -> RidgeWorld:
     ascent: list[float] = []
     descent: list[float] = []
     slope: list[int] = []
+    #: One Surface class per geometric edge (indexed by eid) -- see classify().
+    surface: list[int] = []
+
+    island_set = set(island)
+
+    def classify(u: int, v: int, is_bump: bool) -> int:
+        """Assign a Surface class -- terrain-tied so the filter reroutes.
+
+        Valleys are paved, mid-slopes gravel, the high ridge unpaved: a
+        paved-only filter walls off the crest exactly the way a real road cyclist
+        avoiding gravel would be walled off. The bump approach is left UNKNOWN
+        (as if the OSM surface tag were missing) so every class appears.
+        """
+        if u == bump_anchor and v == bump_a:
+            return int(bf.Surface.UNKNOWN)
+        if is_bump:
+            return int(bf.Surface.UNPAVED)
+        if u in island_set or v in island_set:
+            return int(bf.Surface.GRAVEL)
+        max_elev = max(elev32[u], elev32[v])
+        if max_elev < 640.0:
+            return int(bf.Surface.PAVED)
+        if max_elev < 760.0:
+            return int(bf.Surface.GRAVEL)
+        return int(bf.Surface.UNPAVED)
 
     for eid, (u, v, is_bump) in enumerate(pairs):
         override = None
@@ -408,6 +433,7 @@ def build_ridge_world() -> RidgeWorld:
             bf.encode_max_slope(m.max_slope_pct_fwd),
             bf.encode_max_slope(m.max_slope_pct_rev),
         ]
+        surface.append(classify(u, v, is_bump))
 
     csr = bf.build_csr(
         node_count=node_count,
@@ -457,6 +483,7 @@ def build_ridge_world() -> RidgeWorld:
         edge_max_slope=edge_slope,
         grid_offset=grid_offset,
         grid_nodeid=grid_nodeid,
+        edge_surface=np.array(surface, dtype=np.uint8),  # per geometric edge (eid)
     )
     bf.validate_graph(graph)
 

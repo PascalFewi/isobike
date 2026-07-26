@@ -183,7 +183,7 @@ describe('crc32 agrees with zlib', () => {
 
   it('matches the checksum Python stored in the graph', () => {
     const data = loadGraphBytes();
-    const stored = new DataView(data).getUint32(140, true);
+    const stored = new DataView(data).getUint32(144, true); // crc32 at 144 in v2
     expect(crc32(new Uint8Array(data).subarray(HEADER_SIZE))).toBe(stored);
   });
 });
@@ -197,7 +197,9 @@ describe('corrupt input fails with the same error kinds as Python', () => {
   });
 
   it('rejects an unknown format version', () => {
-    expect(() => readGraph(writeU32(good, 8, 2))).toThrow(UnsupportedVersionError);
+    // v1 is retired and v3 does not exist; both must be rejected.
+    expect(() => readGraph(writeU32(good, 8, 1))).toThrow(UnsupportedVersionError);
+    expect(() => readGraph(writeU32(good, 8, 3))).toThrow(UnsupportedVersionError);
   });
 
   it('rejects an unknown header size', () => {
@@ -236,6 +238,9 @@ describe('corrupt input fails with the same error kinds as Python', () => {
   });
 
   it('rejects a geom_edge_count that disagrees with the edge ids', () => {
-    expect(() => readGraph(writeU32(good, 72, 9999))).toThrow(GraphValidationError);
+    // In v2 geom_edge_count sizes the edge_surface section, so a larger value
+    // runs it past the buffer (truncation). A smaller value still fits, so the
+    // mismatch surfaces at the max(edge_id)+1 cross-check.
+    expect(() => readGraph(writeU32(good, 72, 3))).toThrow(GraphValidationError);
   });
 });

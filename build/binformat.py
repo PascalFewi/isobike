@@ -41,9 +41,8 @@ Header -- exactly 160 bytes::
     off  size  type      field
     ---  ----  --------  -----------------------------------------------------
       0     8  char[8]   magic, always b"VELOGRPH"
-      8     4  u32       format_version (== 1)
-     12     4  u32       header_size (== 160); lets a future reader skip a
-                         longer v2 header without knowing its contents
+      8     4  u32       format_version (== 2)
+     12     4  u32       header_size (== 160)
      16    16  char[16]  region_id, ASCII, NUL-padded ("CH", "ridge-world")
      32     8  f64       bbox_min_lon
      40     8  f64       bbox_min_lat
@@ -55,10 +54,16 @@ Header -- exactly 160 bytes::
      76     4  u32       grid_nx
      80     4  u32       grid_ny
      84     4  u32       flags (bit0 = one-ways respected; others reserved 0)
-     88    48  u32[12]   byte offset of each section, in the order below
-    136     4  u32       file_size, in bytes, including this header
-    140     4  u32       crc32 of every byte after the header (zlib/IEEE)
-    144    16  --        reserved, must be zero
+     88    52  u32[13]   byte offset of each section, in the order below
+    140     4  u32       file_size, in bytes, including this header
+    144     4  u32       crc32 of every byte after the header (zlib/IEEE)
+    148    12  --        reserved, must be zero
+
+Format history
+    v1 (retired) had 12 sections; the offset table was ``u32[12]`` at byte 88 and
+    reserved was 16 bytes. v2 adds ``edge_surface`` as a 13th section, growing the
+    table to ``u32[13]`` and ceding 4 reserved bytes -- so the header stays 160
+    bytes exactly. There is no deployed v1 data, so this reader accepts only v2.
 
 Section *lengths* are not stored; they are implied by the counts above. Sections
 appear in this order, which is also their index in the offset table::
@@ -77,6 +82,7 @@ appear in this order, which is also their index in the offset table::
      9  edge_max_slope   u8     E
     10  grid_offset      u32    grid_nx * grid_ny + 1
     11  grid_nodeid      u32    N
+    12  edge_surface     u8     G    (v2; indexed by edge_id)
 
 Semantics
 =========
@@ -127,6 +133,13 @@ Semantics
     Uniform lat/lon grid over the bbox, ``grid_nx`` by ``grid_ny``, CSR-encoded.
     Cell of a point is ``iy * grid_nx + ix``. Cell sizes are derived from the
     bbox, not stored. ``grid_nodeid`` is a permutation of ``0 .. N-1``.
+
+``edge_surface`` (v2)
+    One :class:`Surface` class per *geometric* edge, indexed by ``edge_id`` (not
+    by directed half-edge -- a way's surface is identical both ways, so storing it
+    once halves the bytes). ``UNKNOWN = 0`` is the safe default for an unclassified
+    edge. Direction-independent, so the router looks it up as
+    ``edge_surface[edge_id[e]]`` for a directed half-edge ``e``.
 """
 
 from __future__ import annotations
@@ -148,11 +161,11 @@ from build.geo import haversine_m_array
 # --------------------------------------------------------------------------- #
 
 MAGIC: Final = b"VELOGRPH"
-FORMAT_VERSION: Final = 1
+FORMAT_VERSION: Final = 2
 HEADER_SIZE: Final = 160
 REGION_ID_SIZE: Final = 16
 SECTION_ALIGN: Final = 8
-SECTION_COUNT: Final = 12
+SECTION_COUNT: Final = 13
 
 #: ``flags`` bit 0. Set when the builder emitted a genuinely directed graph
 #: (one-ways suppressed in the reverse direction). Clear means every geometric
@@ -164,6 +177,25 @@ FLAG_ONEWAYS_RESPECTED: Final = 1 << 0
 SLOPE_STEP_PCT: Final = 0.25
 SLOPE_MAX_U8: Final = 255
 SLOPE_MAX_PCT: Final = SLOPE_MAX_U8 * SLOPE_STEP_PCT  # 63.75
+
+
+class Surface(IntEnum):
+    """Rideable-surface class of a geometric edge (format v2).
+
+    ``UNKNOWN = 0`` so a zero-initialised or unclassified edge reads as "unknown"
+    rather than a misleading "paved". The build pipeline maps OSM ``surface`` /
+    ``tracktype`` tags onto these; the frontend's road/gravel toggle and the
+    worker's optional surface filter both key off them.
+    """
+
+    UNKNOWN = 0
+    PAVED = 1
+    GRAVEL = 2
+    UNPAVED = 3
+
+
+#: Number of defined surface classes; values must stay below this.
+SURFACE_CLASS_COUNT: Final = len(Surface)
 
 _HEADER_STRUCT: Final = struct.Struct(
     "<"        # little-endian, no implicit padding
@@ -178,10 +210,10 @@ _HEADER_STRUCT: Final = struct.Struct(
     "I"        # grid_nx
     "I"        # grid_ny
     "I"        # flags
-    "12I"      # section offsets
+    "13I"      # section offsets (v2: 13 sections)
     "I"        # file_size
     "I"        # crc32
-    "16x"      # reserved
+    "12x"      # reserved (v2: 4 bytes ceded to the 13th section offset)
 )
 assert _HEADER_STRUCT.size == HEADER_SIZE, _HEADER_STRUCT.size
 
@@ -201,13 +233,16 @@ class Section(IntEnum):
     EDGE_MAX_SLOPE = 9
     GRID_OFFSET = 10
     GRID_NODEID = 11
+    #: v2. Per-geometric (indexed by edge_id), not per-directed -- surface is a
+    #: property of the physical way, identical in both directions.
+    EDGE_SURFACE = 12
 
 
 @dataclass(frozen=True)
 class _SectionSpec:
     name: str
     dtype: str
-    #: One of "N", "N+1", "E", "CELLS+1" -- resolved against the header counts.
+    #: One of "N", "N+1", "E", "G", "CELLS+1" -- resolved against the header counts.
     count: str
 
 
@@ -224,6 +259,7 @@ _SECTION_SPECS: Final[tuple[_SectionSpec, ...]] = (
     _SectionSpec("edge_max_slope", "<u1", "E"),
     _SectionSpec("grid_offset", "<u4", "CELLS+1"),
     _SectionSpec("grid_nodeid", "<u4", "N"),
+    _SectionSpec("edge_surface", "<u1", "G"),
 )
 assert len(_SECTION_SPECS) == SECTION_COUNT
 assert tuple(s.name for s in _SECTION_SPECS) == tuple(s.name.lower() for s in Section)
@@ -297,7 +333,7 @@ def slope_exceeds(value: int, limit_pct: float) -> bool:
 # Tests compare field by field instead.
 @dataclass(frozen=True, eq=False)
 class Graph:
-    """A parsed graph binary. Arrays are exactly the twelve stored sections.
+    """A parsed graph binary. Arrays are exactly the thirteen stored sections.
 
     Arrays returned by :func:`read_graph` are read-only views onto the source
     buffer -- no copy, mirroring the Worker's zero-copy typed arrays.
@@ -321,6 +357,8 @@ class Graph:
     edge_max_slope: NDArray[np.uint8]
     grid_offset: NDArray[np.uint32]
     grid_nodeid: NDArray[np.uint32]
+    #: One Surface class per geometric edge, indexed by edge_id (length G).
+    edge_surface: NDArray[np.uint8]
 
     format_version: int = FORMAT_VERSION
 
@@ -610,13 +648,23 @@ def validate_graph(
         if not np.array_equal(expected[ids], cell_of_slot):
             fail("grid_nodeid places a node in the wrong cell")
 
+    # --- edge_surface (v2) ------------------------------------------------- #
+    g = graph.geom_edge_count
+    if graph.edge_surface.shape != (g,):
+        fail(f"edge_surface has length {graph.edge_surface.shape[0]}, expected geom_edge_count {g}")
+    if g and int(graph.edge_surface.max()) >= SURFACE_CLASS_COUNT:
+        fail(
+            f"edge_surface has class {int(graph.edge_surface.max())}, "
+            f"beyond the {SURFACE_CLASS_COUNT} defined Surface values"
+        )
+
 
 # --------------------------------------------------------------------------- #
 # Write
 # --------------------------------------------------------------------------- #
 
 
-def _resolve_count(spec: _SectionSpec, n: int, e: int, cells: int) -> int:
+def _resolve_count(spec: _SectionSpec, n: int, e: int, g: int, cells: int) -> int:
     match spec.count:
         case "N":
             return n
@@ -624,6 +672,8 @@ def _resolve_count(spec: _SectionSpec, n: int, e: int, cells: int) -> int:
             return n + 1
         case "E":
             return e
+        case "G":
+            return g
         case "CELLS+1":
             return cells + 1
     raise AssertionError(f"unknown count expression {spec.count!r}")
@@ -634,7 +684,7 @@ def _align_up(value: int) -> int:
 
 
 def graph_to_bytes(graph: Graph, *, validate: bool = True) -> bytes:
-    """Serialise to the v1 layout. Validates first unless explicitly told not to."""
+    """Serialise to the v2 layout. Validates first unless explicitly told not to."""
     if validate:
         validate_graph(graph)
 
@@ -643,13 +693,14 @@ def graph_to_bytes(graph: Graph, *, validate: bool = True) -> bytes:
         raise BinFormatError(f"region_id {graph.region_id!r} exceeds {REGION_ID_SIZE} ASCII bytes")
 
     n, e, cells = graph.node_count, graph.dir_edge_count, graph.cell_count
+    g = graph.geom_edge_count
 
     payloads: list[bytes] = []
     offsets: list[int] = []
     cursor = HEADER_SIZE
     for spec in _SECTION_SPECS:
         arr = np.ascontiguousarray(getattr(graph, spec.name), dtype=np.dtype(spec.dtype))
-        expected = _resolve_count(spec, n, e, cells)
+        expected = _resolve_count(spec, n, e, g, cells)
         if arr.shape != (expected,):
             raise BinFormatError(f"{spec.name} has length {arr.shape[0]}, expected {expected}")
         raw = arr.tobytes()
@@ -702,7 +753,7 @@ def graph_from_bytes(
     verify_checksum: bool = True,
     validate: bool = True,
 ) -> Graph:
-    """Parse the v1 layout. Arrays are read-only views onto ``data``, not copies."""
+    """Parse the v2 layout. Arrays are read-only views onto ``data``, not copies."""
     buf = memoryview(data)
     if len(buf) < HEADER_SIZE:
         raise TruncatedFileError(f"buffer is {len(buf)} bytes, need at least {HEADER_SIZE}")
@@ -747,7 +798,9 @@ def graph_from_bytes(
     prev_end = HEADER_SIZE
     for spec, offset in zip(_SECTION_SPECS, offsets, strict=True):
         dtype = np.dtype(spec.dtype)
-        count = _resolve_count(spec, n, e, cells)
+        # edge_surface's length is G, taken from the header's geom_edge_count;
+        # it is cross-checked against max(edge_id)+1 once edge_id is parsed.
+        count = _resolve_count(spec, n, e, geom_edge_count, cells)
         end = offset + count * dtype.itemsize
         if offset % SECTION_ALIGN != 0:
             raise TruncatedFileError(f"section {spec.name} at {offset} is not {SECTION_ALIGN}-byte aligned")

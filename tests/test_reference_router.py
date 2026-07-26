@@ -442,6 +442,62 @@ def test_effort_field_omits_edges_the_filter_removes(flat: rr._Flat) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Surface filter (format v2)
+# --------------------------------------------------------------------------- #
+
+_PAVED = frozenset({int(bf.Surface.PAVED)})
+_PAVED_GRAVEL = frozenset({int(bf.Surface.PAVED), int(bf.Surface.GRAVEL)})
+
+
+def test_paved_only_cannot_cross_the_gravel_ridge(flat: rr._Flat, world: rwmod.RidgeWorld) -> None:
+    """The ridge is gravel/unpaved, so a road-only rider is walled off -- like the
+    slope filter, surface can disconnect."""
+    src, dst = world.lattice_node(1, 13), world.lattice_node(20, 13)
+    assert rr.route(flat, src, dst, MIXED) is not None
+    assert rr.route(flat, src, dst, MIXED, allowed_surfaces=_PAVED) is None
+
+
+def test_surface_filter_only_uses_allowed_edges(flat: rr._Flat, world: rwmod.RidgeWorld) -> None:
+    f = flat
+    result = rr.route(f, world.lattice_node(0, 4), world.lattice_node(0, 8), MIXED, allowed_surfaces=_PAVED_GRAVEL)
+    if result is not None:
+        for u, v in zip(result.nodes, result.nodes[1:]):
+            for e in range(f.csr_offset[u], f.csr_offset[u + 1]):
+                if f.edge_target[e] == v:
+                    assert f.edge_surface[f.edge_id[e]] in _PAVED_GRAVEL
+                    break
+
+
+def test_surface_filter_never_lowers_cost(flat: rr._Flat, world: rwmod.RidgeWorld) -> None:
+    """Removing edges can only raise cost -- same monotonicity the slope filter has."""
+    src, dst = world.lattice_node(0, 4), world.lattice_node(3, 4)
+    full = rr.route(flat, src, dst, MIXED)
+    restricted = rr.route(flat, src, dst, MIXED, allowed_surfaces=_PAVED_GRAVEL)
+    assert full is not None
+    if restricted is not None:
+        assert restricted.cost >= full.cost - 1e-9
+
+
+def test_surface_filter_shrinks_the_effort_field(flat: rr._Flat) -> None:
+    full = rr.effort_field(flat, 0, MIXED)
+    paved = rr.effort_field(flat, 0, MIXED, allowed_surfaces=_PAVED)
+    assert 0 < len(paved) < len(full)
+    for eid in paved:
+        assert flat.edge_surface[eid] == int(bf.Surface.PAVED)
+
+
+def test_astar_matches_dijkstra_under_a_surface_filter(flat: rr._Flat) -> None:
+    for src in (0, 175, 300):
+        res = rr.dijkstra(flat, src, MIXED, allowed_surfaces=_PAVED_GRAVEL)
+        for dst in range(flat.node_count):
+            found = rr.astar(flat, src, dst, MIXED, allowed_surfaces=_PAVED_GRAVEL)
+            if res.cost[dst] == INF:
+                assert found is None
+            else:
+                assert found is not None and found.cost == res.cost[dst]
+
+
+# --------------------------------------------------------------------------- #
 # Snapping (unchanged by the cost-model update)
 # --------------------------------------------------------------------------- #
 

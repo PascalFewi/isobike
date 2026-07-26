@@ -187,6 +187,8 @@ class _Flat:
     edge_ascent: list[float]
     edge_descent: list[float]
     edge_max_slope: list[int]
+    #: Per-geometric surface class, indexed by edge_id (length G).
+    edge_surface: list[int]
     node_lat: list[float]
     node_lon: list[float]
     node_elev: list[float]
@@ -203,6 +205,7 @@ def flatten(graph: bf.Graph) -> _Flat:
         edge_ascent=graph.edge_ascent.astype(np.float64).tolist(),
         edge_descent=graph.edge_descent.astype(np.float64).tolist(),
         edge_max_slope=graph.edge_max_slope.astype(np.int64).tolist(),
+        edge_surface=graph.edge_surface.astype(np.int64).tolist(),
         node_lat=graph.node_lat.astype(np.float64).tolist(),
         node_lon=graph.node_lon.astype(np.float64).tolist(),
         node_elev=graph.node_elev.astype(np.float64).tolist(),
@@ -214,10 +217,22 @@ def edge_weight(f: _Flat, e: int, model: CostModel) -> float:
     return model.a * f.edge_dist[e] + model.b * f.edge_ascent[e]
 
 
-def _blocked(f: _Flat, e: int, max_slope_pct: float | None) -> bool:
-    if max_slope_pct is None:
-        return False
-    return bf.slope_exceeds(f.edge_max_slope[e], max_slope_pct)
+def _blocked(
+    f: _Flat,
+    e: int,
+    max_slope_pct: float | None,
+    allowed_surfaces: frozenset[int] | None,
+) -> bool:
+    """True when a directed edge must be skipped under the active filters.
+
+    Surface is per-geometric, so it is looked up by ``edge_id[e]``. ``None`` means
+    the filter is inactive; an empty set would block everything.
+    """
+    if max_slope_pct is not None and bf.slope_exceeds(f.edge_max_slope[e], max_slope_pct):
+        return True
+    if allowed_surfaces is not None and f.edge_surface[f.edge_id[e]] not in allowed_surfaces:
+        return True
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -231,6 +246,7 @@ def dijkstra(
     model: CostModel,
     *,
     max_slope_pct: float | None = None,
+    allowed_surfaces: frozenset[int] | None = None,
     max_cost: float = INF,
 ) -> DijkstraResult:
     """Single-source shortest costs, carrying three accumulators per node.
@@ -261,7 +277,7 @@ def dijkstra(
         cu_ascent = cum_ascent[u]
         cu_slope = max_slope_u8[u]
         for e in range(f.csr_offset[u], f.csr_offset[u + 1]):
-            if _blocked(f, e, max_slope_pct):
+            if _blocked(f, e, max_slope_pct, allowed_surfaces):
                 continue
             v = f.edge_target[e]
             if settled[v]:
@@ -307,6 +323,7 @@ def astar(
     model: CostModel,
     *,
     max_slope_pct: float | None = None,
+    allowed_surfaces: frozenset[int] | None = None,
 ) -> RouteResult | None:
     """Optimal route via A*, or ``None`` if the goal is unreachable."""
     n = f.node_count
@@ -327,7 +344,7 @@ def astar(
 
         cu = g_cost[u]
         for e in range(f.csr_offset[u], f.csr_offset[u + 1]):
-            if _blocked(f, e, max_slope_pct):
+            if _blocked(f, e, max_slope_pct, allowed_surfaces):
                 continue
             v = f.edge_target[e]
             if settled[v]:
@@ -412,9 +429,12 @@ def route(
     model: CostModel,
     *,
     max_slope_pct: float | None = None,
+    allowed_surfaces: frozenset[int] | None = None,
 ) -> RouteResult | None:
     """Ground-truth route via full Dijkstra -- no heuristic in the trusted path."""
-    result = dijkstra(f, source, model, max_slope_pct=max_slope_pct)
+    result = dijkstra(
+        f, source, model, max_slope_pct=max_slope_pct, allowed_surfaces=allowed_surfaces
+    )
     if result.cost[goal] == INF:
         return None
     return build_route(f, source, goal, result.cost, result.incoming)
@@ -431,6 +451,7 @@ def effort_field(
     model: CostModel,
     *,
     max_slope_pct: float | None = None,
+    allowed_surfaces: frozenset[int] | None = None,
     max_cost: float = INF,
 ) -> dict[int, tuple[float, float]]:
     """``edge_id -> (time, cum_ascent)`` over the whole reachable field.
@@ -447,13 +468,20 @@ def effort_field(
     filter, or when it is unreachable: colouring a road the rider is filtering
     out, or cannot reach, would misreport reach.
     """
-    res = dijkstra(f, source, model, max_slope_pct=max_slope_pct, max_cost=max_cost)
+    res = dijkstra(
+        f,
+        source,
+        model,
+        max_slope_pct=max_slope_pct,
+        allowed_surfaces=allowed_surfaces,
+        max_cost=max_cost,
+    )
     cost, cum_ascent = res.cost, res.cum_ascent
 
     field: dict[int, tuple[float, float]] = {}
     for u in range(f.node_count):
         for e in range(f.csr_offset[u], f.csr_offset[u + 1]):
-            if _blocked(f, e, max_slope_pct):
+            if _blocked(f, e, max_slope_pct, allowed_surfaces):
                 continue
             v = f.edge_target[e]
             if cost[u] <= cost[v]:

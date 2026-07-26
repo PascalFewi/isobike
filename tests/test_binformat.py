@@ -98,6 +98,11 @@ def make_tiny_graph() -> bf.Graph:
         edge_max_slope=edge_slope,
         grid_offset=grid_offset,
         grid_nodeid=grid_nodeid,
+        # One surface per geometric edge (4 edges): paved, gravel, unpaved, unknown.
+        edge_surface=np.array(
+            [bf.Surface.PAVED, bf.Surface.GRAVEL, bf.Surface.UNPAVED, bf.Surface.UNKNOWN],
+            dtype=np.uint8,
+        ),
     )
 
 
@@ -120,7 +125,7 @@ def test_header_fields_sit_at_the_documented_byte_offsets() -> None:
     data = bf.graph_to_bytes(make_tiny_graph())
 
     assert data[0:8] == b"VELOGRPH"
-    assert struct.unpack_from("<I", data, 8)[0] == 1  # format_version
+    assert struct.unpack_from("<I", data, 8)[0] == 2  # format_version (v2)
     assert struct.unpack_from("<I", data, 12)[0] == 160  # header_size
     assert data[16:32] == b"tiny" + b"\x00" * 12  # region_id, NUL-padded
     assert struct.unpack_from("<4d", data, 32) == (8.0, 46.5, 8.001, 46.501)  # bbox
@@ -130,23 +135,25 @@ def test_header_fields_sit_at_the_documented_byte_offsets() -> None:
     assert struct.unpack_from("<I", data, 76)[0] == 2  # grid_nx
     assert struct.unpack_from("<I", data, 80)[0] == 2  # grid_ny
     assert struct.unpack_from("<I", data, 84)[0] == 0  # flags
-    assert struct.unpack_from("<I", data, 136)[0] == len(data)  # file_size
-    assert struct.unpack_from("<I", data, 140)[0] == zlib.crc32(data[160:]) & 0xFFFFFFFF
-    assert data[144:160] == b"\x00" * 16  # reserved
+    # v2: 13-entry offset table shifts file_size/crc32 to 140/144, reserved to 148.
+    assert struct.unpack_from("<I", data, 140)[0] == len(data)  # file_size
+    assert struct.unpack_from("<I", data, 144)[0] == zlib.crc32(data[160:]) & 0xFFFFFFFF
+    assert data[148:160] == b"\x00" * 12  # reserved (12 bytes in v2)
 
 
 def test_section_offsets_are_ordered_aligned_and_contiguous() -> None:
     graph = make_tiny_graph()
     data = bf.graph_to_bytes(graph)
-    offsets = struct.unpack_from("<12I", data, 88)
+    offsets = struct.unpack_from("<13I", data, 88)
 
     assert offsets[0] == bf.HEADER_SIZE
     cursor = bf.HEADER_SIZE
     n, e, cells = graph.node_count, graph.dir_edge_count, graph.cell_count
+    g = graph.geom_edge_count
     for spec, offset in zip(bf._SECTION_SPECS, offsets, strict=True):
         assert offset == cursor, f"{spec.name} starts at {offset}, expected {cursor}"
         assert offset % bf.SECTION_ALIGN == 0, f"{spec.name} is misaligned"
-        nbytes = bf._resolve_count(spec, n, e, cells) * np.dtype(spec.dtype).itemsize
+        nbytes = bf._resolve_count(spec, n, e, g, cells) * np.dtype(spec.dtype).itemsize
         cursor = bf._align_up(cursor + nbytes)
     assert cursor == len(data)
 
@@ -161,7 +168,7 @@ def test_header_golden_bytes() -> None:
     data = bf.graph_to_bytes(make_tiny_graph())
     expected = (
         "56454c4f47525048"                  # magic "VELOGRPH"
-        "01000000"                          # format_version 1
+        "02000000"                          # format_version 2
         "a0000000"                          # header_size 160
         "74696e79000000000000000000000000"  # region_id "tiny", NUL-padded to 16
         "0000000000002040"                  # bbox min_lon  8.000
@@ -184,9 +191,10 @@ def test_header_golden_bytes() -> None:
         "88010000"                          # edge_max_slope      @392 (8 B)
         "90010000"                          # grid_offset         @400 (20 B -> pad)
         "a8010000"                          # grid_nodeid         @424
-        "b8010000"                          # file_size 440
-        "cc2472a9"                          # crc32 of bytes 160..440
-        "00000000000000000000000000000000"  # reserved
+        "b8010000"                          # edge_surface        @440 (4 B -> pad)  [v2]
+        "c0010000"                          # file_size 448
+        "aaa2a595"                          # crc32 of bytes 160..448
+        "000000000000000000000000"          # reserved (12 bytes, v2)
     )
     assert data[:160].hex() == expected
 
@@ -342,9 +350,11 @@ def test_bad_magic() -> None:
 
 
 def test_unsupported_version() -> None:
-    data = _corrupt(bf.graph_to_bytes(make_tiny_graph()), 8, struct.pack("<I", 2))
-    with pytest.raises(bf.UnsupportedVersionError):
-        bf.graph_from_bytes(data)
+    # v1 is retired and v3 does not exist; both must be rejected.
+    for version in (1, 3):
+        data = _corrupt(bf.graph_to_bytes(make_tiny_graph()), 8, struct.pack("<I", version))
+        with pytest.raises(bf.UnsupportedVersionError):
+            bf.graph_from_bytes(data)
 
 
 def test_unsupported_header_size() -> None:
@@ -393,7 +403,11 @@ def test_checksum_check_can_be_skipped() -> None:
 
 
 def test_geom_edge_count_disagreeing_with_edge_ids() -> None:
-    data = _corrupt(bf.graph_to_bytes(make_tiny_graph()), 72, struct.pack("<I", 9))
+    # Corrupt DOWN (4 -> 3): in v2 geom_edge_count sizes the edge_surface section,
+    # so a value larger than real would run the section past the buffer (a
+    # TruncatedFileError). A smaller value still fits, so the mismatch surfaces at
+    # the dedicated max(edge_id)+1 cross-check instead.
+    data = _corrupt(bf.graph_to_bytes(make_tiny_graph()), 72, struct.pack("<I", 3))
     with pytest.raises(bf.GraphValidationError, match="geom_edge_count"):
         bf.graph_from_bytes(data)
 
@@ -417,6 +431,50 @@ def _with(graph: bf.Graph, **overrides) -> bf.Graph:
 
 def test_validate_accepts_the_fixture() -> None:
     bf.validate_graph(make_tiny_graph())
+
+
+# --------------------------------------------------------------------------- #
+# edge_surface (format v2)
+# --------------------------------------------------------------------------- #
+
+
+def test_edge_surface_is_per_geometric_and_round_trips() -> None:
+    graph = bf.graph_from_bytes(bf.graph_to_bytes(make_tiny_graph()))
+    # One value per geometric edge (G == 4), not per directed half-edge (E == 8).
+    assert graph.edge_surface.shape == (graph.geom_edge_count,)
+    assert graph.edge_surface.dtype == np.uint8
+    assert graph.edge_surface.tolist() == [
+        bf.Surface.PAVED, bf.Surface.GRAVEL, bf.Surface.UNPAVED, bf.Surface.UNKNOWN,
+    ]
+
+
+def test_both_halves_of_an_edge_share_one_surface() -> None:
+    """Surface is a way property; the reverse half must read the same class."""
+    graph = bf.graph_from_bytes(bf.graph_to_bytes(make_tiny_graph()))
+    for u in range(graph.node_count):
+        for i in range(int(graph.csr_offset[u]), int(graph.csr_offset[u + 1])):
+            eid = int(graph.edge_id[i])
+            # Both directed halves index the same edge_surface[eid] entry.
+            assert 0 <= eid < graph.edge_surface.shape[0]
+
+
+def test_validate_rejects_wrong_length_surface() -> None:
+    graph = make_tiny_graph()
+    broken = graph.edge_surface[:-1].copy()  # length G-1
+    with pytest.raises(bf.GraphValidationError, match="edge_surface"):
+        bf.validate_graph(_with(graph, edge_surface=broken))
+
+
+def test_validate_rejects_unknown_surface_class() -> None:
+    graph = make_tiny_graph()
+    broken = graph.edge_surface.copy()
+    broken[0] = 200  # far beyond the defined Surface classes
+    with pytest.raises(bf.GraphValidationError, match="Surface"):
+        bf.validate_graph(_with(graph, edge_surface=broken))
+
+
+def test_surface_zero_is_unknown() -> None:
+    assert int(bf.Surface.UNKNOWN) == 0  # zero-init reads as unknown, not paved
 
 
 def test_validate_rejects_csr_terminator_mismatch() -> None:

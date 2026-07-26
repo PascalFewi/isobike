@@ -212,4 +212,21 @@ describe('/route', () => {
   it('400s on a missing endpoint', async () => {
     expect((await handleRequest(graph, post('/route', { from: at(0), ...MIXED }))).status).toBe(400);
   });
+
+  it('applies a surfaces filter: paved-only cannot cross the gravel ridge', async () => {
+    const res = await handleRequest(
+      graph,
+      post('/route', { from: at(287), to: at(306), ...MIXED, surfaces: [1] }),
+    );
+    const body = await jsonBody(res);
+    expect(body.found).toBe(false); // ridge is gravel/unpaved
+  });
+
+  it('400s on an empty surfaces array', async () => {
+    const res = await handleRequest(
+      graph,
+      post('/route', { from: at(0), to: at(66), ...MIXED, surfaces: [] }),
+    );
+    expect(res.status).toBe(400);
+  });
 });

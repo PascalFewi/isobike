@@ -10,7 +10,7 @@
  * **seconds**.
  */
 
-import type { Graph } from './binformat.js';
+import { SURFACE_CLASS_COUNT, type Graph } from './binformat.js';
 import { distanceEquivModel, timeModel, type CostModel } from './router.js';
 
 /** Default effort-field budget: 8 hours, in seconds. Profile-independent. */
@@ -133,6 +133,29 @@ function resolveMaxSlope(body: Record<string, unknown>): number | undefined {
   return v;
 }
 
+/**
+ * Parse the optional `surfaces` array (allowed Surface class ids) into a Set.
+ *
+ * `undefined` when absent -- meaning no surface filter. An explicitly empty array
+ * is rejected: it would block every edge, which is never what a caller means and
+ * is almost always a client bug.
+ */
+function resolveSurfaces(body: Record<string, unknown>): ReadonlySet<number> | undefined {
+  const raw = body.surfaces;
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new ApiError('surfaces must be a non-empty array of surface class ids');
+  }
+  const set = new Set<number>();
+  for (const value of raw) {
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value >= SURFACE_CLASS_COUNT) {
+      throw new ApiError(`surfaces entries must be integers in [0, ${SURFACE_CLASS_COUNT - 1}]`);
+    }
+    set.add(value);
+  }
+  return set;
+}
+
 // --------------------------------------------------------------------------- //
 // Parsed request shapes
 // --------------------------------------------------------------------------- //
@@ -142,6 +165,7 @@ export interface EffortFieldRequest {
   readonly lon: number;
   readonly model: CostModel;
   readonly maxSlopePct: number | undefined;
+  readonly allowedSurfaces: ReadonlySet<number> | undefined;
   readonly maxCost: number;
 }
 
@@ -156,6 +180,7 @@ export function parseEffortFieldBody(raw: unknown): EffortFieldRequest {
     lon,
     model,
     maxSlopePct: resolveMaxSlope(body),
+    allowedSurfaces: resolveSurfaces(body),
     maxCost: maxCost ?? DEFAULT_BUDGET_S,
   };
 }
@@ -165,6 +190,7 @@ export interface RouteRequest {
   readonly to: readonly [number, number];
   readonly model: CostModel;
   readonly maxSlopePct: number | undefined;
+  readonly allowedSurfaces: ReadonlySet<number> | undefined;
 }
 
 export function parseRouteBody(raw: unknown): RouteRequest {
@@ -177,6 +203,7 @@ export function parseRouteBody(raw: unknown): RouteRequest {
     to: requireLatLon(body.to, 'to'),
     model: resolveCostModel(body),
     maxSlopePct: resolveMaxSlope(body),
+    allowedSurfaces: resolveSurfaces(body),
   };
 }
 

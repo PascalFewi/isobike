@@ -53,6 +53,7 @@ export interface ExpectedRoute {
   readonly to: number;
   readonly model: ModelSpec;
   readonly max_slope_pct: number | null;
+  readonly surfaces: number[] | null;
   readonly found: boolean;
   readonly cost_s?: number;
   readonly dist_m?: number;
@@ -67,10 +68,16 @@ export interface ExpectedField {
   readonly model: ModelSpec;
   readonly source: number;
   readonly max_slope_pct: number | null;
+  readonly surfaces: number[] | null;
   readonly max_cost_s: number | null;
   readonly edge_count: number;
   /** [edge_id, time_s, cum_ascent_m] */
   readonly entries: ReadonlyArray<readonly [number, number, number]>;
+}
+
+/** `surfaces` in the golden (list of class ids, or null for no filter) -> a Set. */
+export function toSurfaces(value: number[] | null): ReadonlySet<number> | undefined {
+  return value === null ? undefined : new Set(value);
 }
 
 export interface ExpectedProfile {
@@ -90,6 +97,7 @@ export interface Expected {
     readonly default_budget_s: number;
   };
   readonly profiles: readonly ExpectedProfile[];
+  readonly surface_classes: Record<string, number>;
   readonly graph: {
     readonly sha256: string;
     readonly byte_length: number;
@@ -100,6 +108,7 @@ export interface Expected {
     readonly grid_nx: number;
     readonly grid_ny: number;
     readonly bbox: [number, number, number, number];
+    readonly surface_histogram: Record<string, number>;
   };
   readonly fixtures: {
     readonly bump_anchor: number;

@@ -1,9 +1,16 @@
-# Step 1 (binary format + test-data generation) needs only numpy.
+# Steps 1-2 (binary format, test data, OSM tag logic) need only numpy.
 numpy>=1.26,<3
 
 # Dev
 pytest>=8.0
 
-# Added at step 3 (OSM + DEM pipeline), deliberately not installed yet so that a
-# fresh checkout can run the step-1 test suite without pulling GDAL/PROJ wheels:
-#   pyrosm, rasterio, shapely, pyproj, requests
+# --------------------------------------------------------------------------- #
+# Step 3 (OSM + DEM pipeline) -- the data-loading and raster deps.
+#
+# Kept separate so a fresh checkout can run the unit suite (which covers all the
+# pure logic) without pulling GDAL/PROJ wheels. Install with:
+#     pip install -r build/requirements-build.txt
+# The pure tag/collapse/sampling logic imports none of these; only the loader and
+# DEM shells do, and they lazy-import so the modules stay importable without them.
+# tippecanoe (PMTiles) is a separate C++ tool: `apt install tippecanoe` in WSL.
+# --------------------------------------------------------------------------- #

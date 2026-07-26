@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { decodeMaxSlope, slopeExceeds, type Graph } from '../src/binformat.js';
+import { decodeMaxSlope, slopeExceeds, Surface, type Graph } from '../src/binformat.js';
 import { haversineM } from '../src/geo.js';
 import {
   astar,
@@ -312,6 +312,53 @@ describe('the effort model', () => {
       previous = field.count;
     }
     expect(full.count).toBeGreaterThan(effortField(graph, 0, MIXED, { maxCost: 300 }).count);
+  });
+});
+
+describe('the surface filter (v2)', () => {
+  const PAVED = new Set([Surface.Paved]);
+  const PAVED_GRAVEL = new Set([Surface.Paved, Surface.Gravel]);
+
+  it('walls off the gravel ridge for a paved-only rider', () => {
+    expect(route(graph, 287, 306, MIXED)).not.toBeNull();
+    expect(route(graph, 287, 306, MIXED, { allowedSurfaces: PAVED })).toBeNull();
+  });
+
+  it('only traverses allowed surfaces', () => {
+    const r = route(graph, 0, 66, MIXED, { allowedSurfaces: PAVED_GRAVEL });
+    if (r !== null) {
+      for (let i = 0; i + 1 < r.nodes.length; i++) {
+        const u = r.nodes[i];
+        const v = r.nodes[i + 1];
+        for (let e = graph.csrOffset[u]; e < graph.csrOffset[u + 1]; e++) {
+          if (graph.edgeTarget[e] === v) {
+            expect(PAVED_GRAVEL.has(graph.edgeSurface[graph.edgeId[e]])).toBe(true);
+            break;
+          }
+        }
+      }
+    }
+  });
+
+  it('shrinks the effort field to the allowed sub-network', () => {
+    const full = effortField(graph, 0, MIXED);
+    const paved = effortField(graph, 0, MIXED, { allowedSurfaces: PAVED });
+    expect(paved.count).toBeGreaterThan(0);
+    expect(paved.count).toBeLessThan(full.count);
+    for (let id = 0; id < paved.time.length; id++) {
+      if (Number.isFinite(paved.time[id])) expect(graph.edgeSurface[id]).toBe(Surface.Paved);
+    }
+  });
+
+  it('keeps A* == Dijkstra under a surface filter', () => {
+    for (const src of [0, 175, 300]) {
+      const { cost } = dijkstra(graph, src, MIXED, { allowedSurfaces: PAVED_GRAVEL });
+      for (let dst = 0; dst < graph.nodeCount; dst++) {
+        const found = astar(graph, src, dst, MIXED, { allowedSurfaces: PAVED_GRAVEL });
+        if (!Number.isFinite(cost[dst])) expect(found).toBeNull();
+        else expect(found?.cost).toBe(cost[dst]);
+      }
+    }
   });
 });
 

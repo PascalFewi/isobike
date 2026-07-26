@@ -278,6 +278,35 @@ def test_grid_has_substantial_holes(world: rwmod.RidgeWorld) -> None:
     assert 0.25 < empty < 0.85, f"{empty:.0%} of cells are empty"
 
 
+def test_all_surface_classes_appear(world: rwmod.RidgeWorld) -> None:
+    """Every Surface class must be present, or the filter tests exercise nothing."""
+    g = world.graph
+    assert g.edge_surface.shape == (g.geom_edge_count,)
+    present = set(g.edge_surface.tolist())
+    for cls in bf.Surface:
+        assert int(cls) in present, f"{cls.name} missing from the fixture"
+
+
+def test_surface_is_terrain_tied(world: rwmod.RidgeWorld) -> None:
+    """Paved edges stay in the valley; the high ridge is unpaved. This is what
+    makes a paved-only filter wall off the crest."""
+    g = world.graph
+    paved_max = 0.0
+    unpaved_min = 1e9
+    for u in range(g.node_count):
+        for i in range(int(g.csr_offset[u]), int(g.csr_offset[u + 1])):
+            eid = int(g.edge_id[i])
+            v = int(g.edge_target[i])
+            edge_max_elev = max(float(g.node_elev[u]), float(g.node_elev[v]))
+            s = int(g.edge_surface[eid])
+            if s == int(bf.Surface.PAVED):
+                paved_max = max(paved_max, edge_max_elev)
+            elif s == int(bf.Surface.UNPAVED):
+                unpaved_min = min(unpaved_min, edge_max_elev)
+    # Paved tops out below where unpaved begins (the bump spur aside).
+    assert paved_max < 700.0
+
+
 def test_bbox_hugs_the_stored_coordinates(world: rwmod.RidgeWorld) -> None:
     g = world.graph
     min_lon, min_lat, max_lon, max_lat = g.bbox

@@ -122,9 +122,9 @@ Einziger manueller Schritt für Pascal: Schritt 3 lokal ausführen (eine Nacht) 
 
 ## Offene Punkte
 
-- Einbahnstrassen: v1 ignoriert sie (undirected) oder respektiert sie (directed, Binary kann's) – Entscheid vor Schritt 3.
+- ~~Einbahnstrassen~~ **(gelöst):** respektiert mit Velo-Ausnahmen. `oneway=yes` sperrt die Gegenrichtung, ausser `oneway:bicycle=no` (legaler Gegenverkehr); `oneway:bicycle=yes` sperrt auch auf Zweirichtungsstrassen. Format-Flag `FLAG_ONEWAYS_RESPECTED` gesetzt.
 - ~~Zeitmodell~~ **(gelöst, v1.1):** rein zeitlich, `cost = dist/v_flat + ascent/vam`, zwei Geschwindigkeiten aus dem Profil. Später Physikmodell aus KOM QOM (P(v) invertieren, VAM aus Fitness ableiten statt gleich skalieren).
-- OSM-Filter-Details: welche highway-Typen rein (track/path mit surface-Tags?) – Entscheid vor Schritt 3, betrifft Rennrad- vs. Gravel-Profil.
+- ~~OSM-Filter / Rennrad-vs-Gravel~~ **(gelöst, Format v2):** Gravel-inklusives Netz, plus **`edge_surface` pro Geom-Edge** (Enum `unknown/paved/gravel/unpaved`) im Binary. Ermöglicht einen Road/Gravel-Toggle: der Worker filtert optional per `surfaces`-Parameter (wie `max_slope`), und die PMTiles tragen `surface` fürs client-seitige Ein-/Ausblenden. Siehe „Binary-Format v2".
 
 ## Kostenmodell v1.1 – Referenz
 
@@ -133,4 +133,12 @@ Einziger manueller Schritt für Pascal: Schritt 3 lokal ausführen (eine Nacht) 
 - **A*-Heuristik** (admissible & konsistent): `h = a·Luftlinie + b·max(0, Δh_netto)`, mit dem bestehenden Sicherheitsfaktor `(1 − 2⁻¹⁶)` gegen Float-Überschätzung. Skalierung eines konsistenten Heuristik mit `c ≤ 1` bleibt konsistent.
 - **Drei Akkumulatoren pro Node** (Dijkstra, entlang des kostenoptimalen Pfads): Zeit, kumulierte Höhenmeter, max. Steigung. Kostet null Extra-Rechenzeit; Voraussetzung für den zweiten Farbkanal.
 - **Effort-Field pro Geom-Edge:** `time = min(cost[u], cost[v])` (Isochronen-Konvention, D2), `cum_ascent` = kumulierte Höhenmeter am selben (günstigeren) Endpunkt; bei Kosten-Gleichstand deterministisch der kleinere cum_ascent.
-- **Binary-Graph-Format unverändert.** `graph.bin` speichert weiter dist/ascent/descent/max_slope pro gerichteter Edge; nur das Response-Format bekommt das `cum_ascent`-Feld.
+
+## Binary-Format v2 – edge_surface
+
+`graph.bin` bleibt bit-identisch in Header-Grösse (160 B), gewinnt aber eine 13. Section:
+
+- **`edge_surface`** – `u8` **pro Geom-Edge** (indexiert nach `edge_id`, nicht pro gerichteter Half-Edge; Oberfläche ist richtungsunabhängig → halbe Bytes). Enum: `0=unknown, 1=paved, 2=gravel, 3=unpaved` (0 = sicherer Default für unklassifiziert).
+- Header: `format_version → 2`; Offset-Tabelle 12→13 Einträge (Byte 88), `file_size`/`crc32` rücken auf 140/144, Reserved schrumpft 16→12 B. Netto weiterhin 160 B. Reader akzeptiert nur v2 (kein v1-Deployment existiert).
+- `binformat.py` ↔ `binformat.ts` gespiegelt, Ridge-World-Golden mit Oberflächen neu generiert; Cross-Language byte-exakt verifiziert.
+- Worker: optionaler `surfaces`-Query-Parameter (Liste erlaubter Klassen-IDs) filtert Edges beim Expandieren, exakt wie `max_slope`; A*-Heuristik bleibt gültig (Kanten entfernen kann Kosten nur erhöhen).

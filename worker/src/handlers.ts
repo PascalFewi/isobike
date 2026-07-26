@@ -66,6 +66,7 @@ export async function handleEffortField(graph: Graph, request: Request): Promise
   const source = snap(graph, req.lat, req.lon);
   const field = effortField(graph, source, req.model, {
     maxSlopePct: req.maxSlopePct,
+    allowedSurfaces: req.allowedSurfaces,
     maxCost: req.maxCost,
   });
   const buffer = serializeEffortField(graph, source, field);
@@ -87,7 +88,10 @@ export async function handleRoute(graph: Graph, request: Request): Promise<Respo
   const req = parseRouteBody(await readJsonBody(request));
   const from = snap(graph, req.from[0], req.from[1]);
   const to = snap(graph, req.to[0], req.to[1]);
-  const result = route(graph, from, to, req.model, { maxSlopePct: req.maxSlopePct });
+  const result = route(graph, from, to, req.model, {
+    maxSlopePct: req.maxSlopePct,
+    allowedSurfaces: req.allowedSurfaces,
+  });
 
   const base = { from_snapped: snapped(graph, from), to_snapped: snapped(graph, to) };
   if (result === null) {

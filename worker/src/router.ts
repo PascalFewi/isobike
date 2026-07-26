@@ -80,6 +80,9 @@ export function distanceEquivModel(climbFactor: number): CostModel {
 export interface SearchOptions {
   /** Skip edges whose uphill grade exceeds this, in percent. */
   readonly maxSlopePct?: number | undefined;
+  /** If set, skip edges whose surface class is not in the set. Mirrors Python's
+   * frozenset; an empty set blocks everything, `undefined` disables the filter. */
+  readonly allowedSurfaces?: ReadonlySet<number> | undefined;
   /** Stop expanding beyond this cost. Seconds under the time model. */
   readonly maxCost?: number | undefined;
 }
@@ -112,8 +115,18 @@ export function edgeWeight(graph: Graph, edge: number, model: CostModel): number
   return model.a * graph.edgeDist[edge] + model.b * graph.edgeAscent[edge];
 }
 
-function blocked(graph: Graph, edge: number, maxSlopePct: number | undefined): boolean {
-  return maxSlopePct !== undefined && slopeExceeds(graph.edgeMaxSlope[edge], maxSlopePct);
+function blocked(
+  graph: Graph,
+  edge: number,
+  maxSlopePct: number | undefined,
+  allowedSurfaces: ReadonlySet<number> | undefined,
+): boolean {
+  if (maxSlopePct !== undefined && slopeExceeds(graph.edgeMaxSlope[edge], maxSlopePct)) return true;
+  // Surface is per-geometric, so look it up by edgeId.
+  if (allowedSurfaces !== undefined && !allowedSurfaces.has(graph.edgeSurface[graph.edgeId[edge]])) {
+    return true;
+  }
+  return false;
 }
 
 // --------------------------------------------------------------------------- //
@@ -126,7 +139,7 @@ export function dijkstra(
   model: CostModel,
   options: SearchOptions = {},
 ): DijkstraResult {
-  const { maxSlopePct, maxCost = Infinity } = options;
+  const { maxSlopePct, allowedSurfaces, maxCost = Infinity } = options;
   const n = graph.nodeCount;
 
   const cost = new Float64Array(n).fill(Infinity);
@@ -151,7 +164,7 @@ export function dijkstra(
     const cuSlope = maxSlope[u];
     const end = graph.csrOffset[u + 1];
     for (let e = graph.csrOffset[u]; e < end; e++) {
-      if (blocked(graph, e, maxSlopePct)) continue;
+      if (blocked(graph, e, maxSlopePct, allowedSurfaces)) continue;
       const v = graph.edgeTarget[e];
       if (settled[v] === 1) continue;
       const nc = c + edgeWeight(graph, e, model);
@@ -204,7 +217,7 @@ export function astar(
   model: CostModel,
   options: SearchOptions = {},
 ): RouteResult | null {
-  const { maxSlopePct } = options;
+  const { maxSlopePct, allowedSurfaces } = options;
   const n = graph.nodeCount;
 
   const gCost = new Float64Array(n).fill(Infinity);
@@ -237,7 +250,7 @@ export function astar(
     const cu = gCost[u];
     const end = graph.csrOffset[u + 1];
     for (let e = graph.csrOffset[u]; e < end; e++) {
-      if (blocked(graph, e, maxSlopePct)) continue;
+      if (blocked(graph, e, maxSlopePct, allowedSurfaces)) continue;
       const v = graph.edgeTarget[e];
       if (settled[v] === 1) continue;
       const nc = cu + edgeWeight(graph, e, model);
@@ -368,7 +381,7 @@ export function effortField(
   model: CostModel,
   options: SearchOptions = {},
 ): EffortField {
-  const { maxSlopePct, maxCost = Infinity } = options;
+  const { maxSlopePct, allowedSurfaces, maxCost = Infinity } = options;
   const { cost, cumAscent } = dijkstra(graph, source, model, options);
 
   // Dense arrays rather than a Map. The field spans up to every geometric edge,
@@ -382,7 +395,7 @@ export function effortField(
   for (let u = 0; u < graph.nodeCount; u++) {
     const end = graph.csrOffset[u + 1];
     for (let e = graph.csrOffset[u]; e < end; e++) {
-      if (blocked(graph, e, maxSlopePct)) continue;
+      if (blocked(graph, e, maxSlopePct, allowedSurfaces)) continue;
       const v = graph.edgeTarget[e];
       let t: number;
       let asc: number;

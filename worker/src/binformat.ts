@@ -16,10 +16,10 @@
 import { haversineM } from './geo.js';
 
 export const MAGIC = 'VELOGRPH';
-export const FORMAT_VERSION = 1;
+export const FORMAT_VERSION = 2;
 export const HEADER_SIZE = 160;
 export const SECTION_ALIGN = 8;
-export const SECTION_COUNT = 12;
+export const SECTION_COUNT = 13;
 
 /** `flags` bit 0: the builder emitted a genuinely directed graph. Provenance only. */
 export const FLAG_ONEWAYS_RESPECTED = 1 << 0;
@@ -31,8 +31,22 @@ export const FLAG_ONEWAYS_RESPECTED = 1 << 0;
 export const SLOPE_STEP_PCT = 0.25;
 export const SLOPE_MAX_U8 = 255;
 
+/**
+ * Rideable-surface class of a geometric edge (format v2). Mirrors `Surface` in
+ * binformat.py. A regular (non-const) enum so it can be used across modules and
+ * in tests under `isolatedModules`. `Unknown = 0` is the safe default.
+ */
+export enum Surface {
+  Unknown = 0,
+  Paved = 1,
+  Gravel = 2,
+  Unpaved = 3,
+}
+export const SURFACE_CLASS_COUNT = 4;
+
 /** Byte offsets of the header fields. Kept as named constants so the reader reads
- * like the table in binformat.py rather than like a pile of magic numbers. */
+ * like the table in binformat.py rather than like a pile of magic numbers.
+ * v2: the 13-entry offset table pushes file_size/crc32 from 136/140 to 140/144. */
 const OFF_MAGIC = 0;
 const OFF_FORMAT_VERSION = 8;
 const OFF_HEADER_SIZE = 12;
@@ -45,8 +59,8 @@ const OFF_GRID_NX = 76;
 const OFF_GRID_NY = 80;
 const OFF_FLAGS = 84;
 const OFF_SECTIONS = 88;
-const OFF_FILE_SIZE = 136;
-const OFF_CRC32 = 140;
+const OFF_FILE_SIZE = 140;
+const OFF_CRC32 = 144;
 
 /** Index into the header's section-offset table. Order is part of the format. */
 export const enum Section {
@@ -62,6 +76,8 @@ export const enum Section {
   EdgeMaxSlope = 9,
   GridOffset = 10,
   GridNodeId = 11,
+  /** v2. Per-geometric (indexed by edge_id), not per-directed. */
+  EdgeSurface = 12,
 }
 
 // --------------------------------------------------------------------------- //
@@ -133,6 +149,8 @@ export interface Graph {
   readonly edgeMaxSlope: Uint8Array;
   readonly gridOffset: Uint32Array;
   readonly gridNodeId: Uint32Array;
+  /** One Surface class per geometric edge, indexed by edgeId (length G). v2. */
+  readonly edgeSurface: Uint8Array;
 }
 
 export interface ReadGraphOptions {
@@ -279,6 +297,8 @@ export function readGraph(data: ArrayBuffer, options: ReadGraphOptions = {}): Gr
     [Section.EdgeMaxSlope, 'edge_max_slope', 1, dirEdgeCount],
     [Section.GridOffset, 'grid_offset', 4, cellCount + 1],
     [Section.GridNodeId, 'grid_nodeid', 4, nodeCount],
+    // v2: edge_surface's length is G (geomEdgeCount), cross-checked below.
+    [Section.EdgeSurface, 'edge_surface', 1, geomEdgeCount],
   ];
 
   let prevEnd = HEADER_SIZE;
@@ -324,6 +344,7 @@ export function readGraph(data: ArrayBuffer, options: ReadGraphOptions = {}): Gr
     edgeMaxSlope: new Uint8Array(data, offsets[Section.EdgeMaxSlope], dirEdgeCount),
     gridOffset: new Uint32Array(data, offsets[Section.GridOffset], cellCount + 1),
     gridNodeId: new Uint32Array(data, offsets[Section.GridNodeId], nodeCount),
+    edgeSurface: new Uint8Array(data, offsets[Section.EdgeSurface], geomEdgeCount),
   };
 
   let maxEdgeId = 0;
@@ -466,6 +487,19 @@ export function validateGraph(graph: Graph, options: ValidateOptions = {}): void
       if (cellOfPoint(graph, graph.nodeLat[node], graph.nodeLon[node]) !== cell) {
         fail('grid_nodeid places a node in the wrong cell');
       }
+    }
+  }
+
+  // edge_surface (v2): one class per geometric edge, within the defined range.
+  if (graph.edgeSurface.length !== graph.geomEdgeCount) {
+    fail(
+      `edge_surface has length ${graph.edgeSurface.length}, ` +
+        `expected geom_edge_count ${graph.geomEdgeCount}`,
+    );
+  }
+  for (let i = 0; i < graph.edgeSurface.length; i++) {
+    if (graph.edgeSurface[i] >= SURFACE_CLASS_COUNT) {
+      fail(`edge_surface[${i}] is class ${graph.edgeSurface[i]}, beyond the defined Surface values`);
     }
   }
 
