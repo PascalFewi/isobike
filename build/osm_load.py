@@ -313,6 +313,13 @@ class RawNetwork:
 # --------------------------------------------------------------------------- #
 
 
+# Tags we read straight off pyrosm's edge columns when present. Everything else
+# we need (colon tags like oneway:bicycle, and tags pyrosm leaves un-promoted)
+# comes out of the row's `tags` JSON blob -- see _edge_tags.
+_COLUMN_TAGS: Final = ("highway", "surface", "oneway", "bicycle", "access", "service")
+_JSON_TAGS: Final = ("tracktype", "junction", "cycleway", "oneway:bicycle")
+
+
 def load_bike_network(
     pbf_path: str,
     *,
@@ -321,68 +328,113 @@ def load_bike_network(
     """Read a PBF and build a :class:`RawNetwork` of the cyclable ways.
 
     ``pyrosm`` is imported lazily so this module's pure tag logic stays importable
-    (and unit-testable) without GDAL/pyrosm installed. This function needs real
-    data and is exercised at pipeline-execution time, not in the unit suite --
-    the correctness-critical decisions it applies are already covered there.
+    (and unit-testable) without GDAL/pyrosm installed. The tag decisions it applies
+    -- highway allowlist, one-way + bicycle exceptions, surface, access -- are the
+    unit-tested pure functions above; this function only adapts pyrosm's shape to
+    them.
 
-    ``bbox`` is ``(min_lon, min_lat, max_lon, max_lat)`` for the ``--region`` test
-    area; ``None`` reads the whole PBF.
+    pyrosm already splits ways into node-to-node segments (each edge row carries
+    ``u``/``v`` and a LineString), so one row maps to one :class:`RawEdge`. The
+    degree-2 collapse merges the resulting chains later.
+
+    ``bbox`` is ``(min_lon, min_lat, max_lon, max_lat)``; ``None`` reads the whole
+    PBF.
     """
     try:
         from pyrosm import OSM  # type: ignore[import-untyped]
     except ImportError as exc:  # pragma: no cover - environment-dependent
         raise RuntimeError(
-            "pyrosm is required to load OSM data; install the step-3 build "
-            "dependencies (see build/requirements.txt)"
+            "pyrosm is required to load OSM data; install build/requirements-build.txt"
         ) from exc
 
     osm = OSM(pbf_path, bounding_box=list(bbox) if bbox is not None else None)
-    # Pull every candidate highway; filtering by tag is our job, not pyrosm's, so
-    # the decision logic lives in one tested place.
-    ways = osm.get_network(network_type="all", nodes=False)
+    # network_type="all" = every highway; the bike filtering is our job, done once
+    # in the tested tag logic rather than delegated to pyrosm's presets. nodes=True
+    # gives the u/v graph references.
+    result = osm.get_network(network_type="all", nodes=True)
 
     network = RawNetwork()
-    if ways is None:  # pragma: no cover - empty region
+    if result is None:  # pragma: no cover - empty region
+        return network
+    nodes, edges = result
+    if edges is None or len(edges) == 0:  # pragma: no cover - empty region
         return network
 
-    for row in ways.itertuples():
-        tags = _row_tags(row)
+    # Authoritative node coordinates, keyed by OSM id.
+    node_ids = nodes["id"].to_numpy()
+    node_lats = nodes["lat"].to_numpy()
+    node_lons = nodes["lon"].to_numpy()
+    for i in range(len(node_ids)):
+        network.node_lat[int(node_ids[i])] = float(node_lats[i])
+        network.node_lon[int(node_ids[i])] = float(node_lons[i])
+
+    # Vectorised column access (colon columns cannot be read via itertuples).
+    us = edges["u"].to_numpy()
+    vs = edges["v"].to_numpy()
+    way_ids = edges["id"].to_numpy() if "id" in edges.columns else [0] * len(edges)
+    geoms = edges["geometry"].to_numpy()
+    tags_json = edges["tags"].to_numpy() if "tags" in edges.columns else [None] * len(edges)
+    columns = {k: edges[k].to_numpy() for k in _COLUMN_TAGS if k in edges.columns}
+
+    for i in range(len(edges)):
+        tags = _edge_tags(columns, tags_json[i], i)
         if not included_highway(tags) or not is_bike_allowed(tags):
             continue
+        u, v = int(us[i]), int(vs[i])
+        if u == v:
+            continue  # degenerate self-segment
+        geometry = _linestring_latlon(geoms[i])
+        if geometry is None or len(geometry) < 2:
+            continue
+        # Endpoints must be known nodes; fall back to the geometry ends if a node
+        # slipped out of the node table (rare boundary effect of a bbox cut).
+        network.node_lat.setdefault(u, geometry[0][0])
+        network.node_lon.setdefault(u, geometry[0][1])
+        network.node_lat.setdefault(v, geometry[-1][0])
+        network.node_lon.setdefault(v, geometry[-1][1])
+
         forward, backward = edge_directions(tags)
-        surface = classify_surface(tags)
-        _add_way_geometry(network, row, tags, forward, backward, surface)
+        network.edges.append(
+            RawEdge(
+                u=u, v=v, way_id=int(way_ids[i]), highway=tags["highway"],
+                surface=classify_surface(tags), forward=forward, backward=backward,
+                geometry=geometry,
+            )
+        )
 
     return network
 
 
-def _row_tags(row: object) -> dict[str, str]:  # pragma: no cover - pyrosm shape
-    """Extract a tag dict from a pyrosm way row.
+def _edge_tags(
+    columns: Mapping[str, object], tags_json: object, i: int
+) -> dict[str, str]:
+    """Assemble a tag dict for edge row ``i`` from columns + the leftover JSON blob.
 
-    Kept tiny and isolated because the exact pyrosm column layout is a moving
-    target across versions; the pure logic above never sees a pyrosm object.
+    A column value wins; anything missing (notably colon tags like
+    ``oneway:bicycle``) is looked up in pyrosm's un-promoted ``tags`` JSON string.
     """
+    import json
+
     tags: dict[str, str] = {}
-    for key in (
-        "highway", "surface", "tracktype", "oneway", "oneway:bicycle",
-        "bicycle", "access", "junction", "cycleway",
-    ):
-        value = getattr(row, key.replace(":", "_"), None)
+    for key, arr in columns.items():
+        value = arr[i]  # type: ignore[index]
         if value is not None and value == value:  # not NaN
             tags[key] = str(value)
+
+    if tags_json is not None and tags_json == tags_json and str(tags_json) not in ("", "None"):
+        try:
+            parsed = json.loads(str(tags_json))
+        except (ValueError, TypeError):  # pragma: no cover - malformed blob
+            parsed = {}
+        for key in (*_COLUMN_TAGS, *_JSON_TAGS):
+            if key not in tags and key in parsed and parsed[key] is not None:
+                tags[key] = str(parsed[key])
     return tags
 
 
-def _add_way_geometry(  # pragma: no cover - pyrosm shape
-    network: RawNetwork,
-    row: object,
-    tags: dict[str, str],
-    forward: bool,
-    backward: bool,
-    surface: Surface,
-) -> None:
-    """Split a pyrosm way row into :class:`RawEdge`s. Filled in at step-3 run time
-    once the concrete pyrosm geometry/node columns are pinned."""
-    raise NotImplementedError(
-        "geometry extraction is wired up during the step-3 run against real data"
-    )
+def _linestring_latlon(geom: object) -> list[tuple[float, float]] | None:
+    """Shapely LineString (lon, lat) -> a list of (lat, lon), the RawEdge order."""
+    coords = getattr(geom, "coords", None)
+    if coords is None:  # pragma: no cover - unexpected geometry type
+        return None
+    return [(lat, lon) for lon, lat in coords]

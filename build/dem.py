@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Final, Protocol, Sequence
 
 from build.binformat import Surface
@@ -291,7 +292,7 @@ def measure_network(raw: RawNetwork, sampler: Sampler) -> MeasuredNetwork:
 
 
 # --------------------------------------------------------------------------- #
-# swissALTI3D source shell (lazy rasterio; run at pipeline time)
+# DEM sources (lazy rasterio; run at pipeline time)
 # --------------------------------------------------------------------------- #
 
 
@@ -301,24 +302,133 @@ class RasterSource(Protocol):
     def elevation(self, lat: float, lon: float) -> float: ...
 
 
+#: Copernicus GLO-30 open data on AWS (public, no auth). 1 deg x 1 deg COG tiles,
+#: already in WGS84 lat/lon -- so no CRS transform, unlike swissALTI3D (LV95).
+GLO30_URL: Final = (
+    "https://copernicus-dem-30m.s3.amazonaws.com/"
+    "Copernicus_DSM_COG_10_{ns}{lat:02d}_00_{ew}{lon:03d}_00_DEM/"
+    "Copernicus_DSM_COG_10_{ns}{lat:02d}_00_{ew}{lon:03d}_00_DEM.tif"
+)
+
+
+def _glo30_tile_name(tile_lat: int, tile_lon: int) -> tuple[str, str]:
+    """(url, local filename) for the 1 deg tile whose SW corner is (tile_lat, tile_lon)."""
+    ns, lat = ("N", tile_lat) if tile_lat >= 0 else ("S", -tile_lat)
+    ew, lon = ("E", tile_lon) if tile_lon >= 0 else ("W", -tile_lon)
+    url = GLO30_URL.format(ns=ns, lat=lat, ew=ew, lon=lon)
+    return url, url.rsplit("/", 1)[1]
+
+
+class Glo30Sampler:
+    """Copernicus GLO-30 (~30 m) elevation sampler -- the default DEM.
+
+    Small and global: for the 10 m along-edge sampling and 200 m slope window we
+    use, 30 m is ample, and a country fits in a handful of ~30 MB tiles instead of
+    swissALTI3D's ~40 GB. Tiles are downloaded once to ``cache_dir`` (resumable)
+    and bilinearly interpolated, so ascent profiles stay smooth rather than
+    stair-stepping on pixel edges.
+
+    No unit test: it is real network + raster I/O. The pure math that turns its
+    output into the stored metrics is covered above.
+    """
+
+    def __init__(self, cache_dir: str) -> None:
+        self._cache = Path(cache_dir)
+        self._cache.mkdir(parents=True, exist_ok=True)
+        # (tile_lat, tile_lon) -> (array, inverse_transform, height, width) or None.
+        self._tiles: dict[tuple[int, int], tuple[object, object, int, int] | None] = {}
+
+    def __call__(self, lat: float, lon: float) -> float:
+        tile = self._tile(math.floor(lat), math.floor(lon))
+        if tile is None:
+            # Ocean / missing tile: GLO-30 leaves sea as nodata. Treat as 0 m.
+            return 0.0
+        array, inv, height, width = tile
+        col, row = inv * (lon, lat)  # type: ignore[operator]
+        return _bilinear(array, row, col, height, width)
+
+    def _tile(self, tile_lat: int, tile_lon: int):
+        key = (tile_lat, tile_lon)
+        if key in self._tiles:
+            return self._tiles[key]
+
+        import numpy as np
+        import rasterio
+
+        url, name = _glo30_tile_name(tile_lat, tile_lon)
+        path = self._cache / name
+        if not path.exists():
+            self._download(url, path)
+        if not path.exists():  # download failed (e.g. ocean tile 404)
+            self._tiles[key] = None
+            return None
+
+        with rasterio.open(path) as ds:
+            array = ds.read(1).astype(np.float32)
+            nodata = ds.nodata
+            if nodata is not None:
+                array[array == nodata] = 0.0
+            inv = ~ds.transform
+            height, width = ds.height, ds.width
+        self._tiles[key] = (array, inv, height, width)
+        return self._tiles[key]
+
+    def _download(self, url: str, path: Path) -> None:
+        import requests
+
+        try:
+            with requests.get(url, stream=True, timeout=120) as resp:
+                if resp.status_code == 404:  # ocean tiles simply do not exist
+                    return
+                resp.raise_for_status()
+                tmp = path.with_suffix(path.suffix + ".part")
+                with tmp.open("wb") as fh:
+                    for chunk in resp.iter_content(chunk_size=1 << 20):
+                        fh.write(chunk)
+                tmp.replace(path)  # atomic: a killed download never leaves a half tile
+        except requests.RequestException as exc:  # pragma: no cover - network
+            raise RuntimeError(f"failed to download DEM tile {url}: {exc}") from exc
+
+
+def _bilinear(array: object, row: float, col: float, height: int, width: int) -> float:
+    """Bilinear sample of a 2D array at fractional (row, col), clamped to bounds."""
+    r0 = min(max(int(math.floor(row)), 0), height - 1)
+    c0 = min(max(int(math.floor(col)), 0), width - 1)
+    r1 = min(r0 + 1, height - 1)
+    c1 = min(c0 + 1, width - 1)
+    fr = row - r0
+    fc = col - c0
+    a = array  # type: ignore[assignment]
+    v00 = float(a[r0, c0]); v01 = float(a[r0, c1])  # type: ignore[index]
+    v10 = float(a[r1, c0]); v11 = float(a[r1, c1])  # type: ignore[index]
+    top = v00 + (v01 - v00) * fc
+    bottom = v10 + (v11 - v10) * fc
+    return top + (bottom - top) * fr
+
+
 class SwissAlti3dSampler:
-    """Downloads + caches swissALTI3D 2 m tiles and samples them with rasterio.
+    """swissALTI3D 2 m sampler -- an opt-in upgrade over GLO-30 for finer slopes.
 
-    Only the road corridors are fetched (the spec's tile-wise download), keyed by
-    the STAC API, and cached under ``cache_dir`` so a re-run resumes rather than
-    re-downloading. Copernicus GLO-30 is the documented fallback for gaps.
-
-    Left as a shell wired up at pipeline-execution time: it needs rasterio/pyproj
-    and network access, and the pure profile math above -- the part that turns
-    elevation into the stored metrics -- is what the golden files depend on and is
-    fully covered by the unit suite.
+    Downloads swissALTI3D tiles for the road corridors via the swisstopo STAC API
+    (CH only; LV95/EPSG:2056, so it needs a pyproj transform to WGS84) and samples
+    with rasterio. Left as a shell: it is CH-specific, ~40 GB, and only worth it if
+    the coarser GLO-30 slopes prove insufficient. GLO-30 is the default.
     """
 
     def __init__(self, cache_dir: str) -> None:
         self.cache_dir = cache_dir
 
-    def __call__(self, lat: float, lon: float) -> float:  # pragma: no cover - I/O
+    def __call__(self, lat: float, lon: float) -> float:  # pragma: no cover - opt-in I/O
         raise NotImplementedError(
-            "swissALTI3D sampling is wired up during the step-3 run; install the "
-            "build deps (rasterio, pyproj, requests) and provide network access"
+            "swissALTI3D is an opt-in upgrade; GLO-30 is the default DEM. Wire up "
+            "the swisstopo STAC download here if 30 m slopes prove insufficient."
         )
+
+
+def make_sampler(source: str, cache_dir: str) -> Sampler:
+    """Return a DEM sampler by name. ``glo30`` (default) or ``swissalti3d``."""
+    if source == "glo30":
+        return Glo30Sampler(cache_dir)
+    if source == "swissalti3d":
+        return SwissAlti3dSampler(cache_dir)
+    raise ValueError(f"unknown DEM source {source!r}; use 'glo30' or 'swissalti3d'")

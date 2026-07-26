@@ -1,14 +1,39 @@
-# build — the graph pipeline (runs locally, not deployed)
+# build — the graph pipeline (runs anywhere, not deployed)
 
-Turns OSM + swissALTI3D into the R2 artefacts: `graph.bin` (v2), `network.pmtiles`,
-`meta.json`. Develop against a small `--region`; the Switzerland run is overnight.
+Turns OSM + a DEM into the R2 artefacts: `graph.bin` (v2), `network.pmtiles`,
+`meta.json`. Both data adapters are implemented and **verified on real OSM + real
+DEM** (a real routable `graph.bin` built from a live extract).
+
+## Run anywhere — your laptop never needs the data
+
+The heavy part is DEM tiles. By defaulting to **Copernicus GLO-30** (~30 m,
+global, a few hundred MB) instead of swissALTI3D 2 m (~40 GB), the whole build
+fits a laptop, a Colab session, or a throwaway VPS. One script does it all —
+deps, OSM download, build, tippecanoe, and (optionally) the R2 upload:
 
 ```bash
-pip install -r build/requirements-build.txt        # pyrosm, rasterio, ...
-python build/build_graph.py --region test-oberland --pbf switzerland-latest.osm.pbf
-# then, in WSL: tippecanoe -o out/.../network.pmtiles -l network -zg \
-#                          --drop-densest-as-needed out/.../network.geojson
+# VPS / Colab (`!bash build/run_build.sh`):
+REGION=test-oberland bash build/run_build.sh                    # small, minutes
+REGION=switzerland   bash build/run_build.sh                    # national
+# national + push to R2:
+REGION=switzerland R2_BUCKET=velorouter-graph R2_ENDPOINT=https://<acct>.r2.cloudflarestorage.com \
+  AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... bash build/run_build.sh
 ```
+
+Or drive the stages directly:
+
+```bash
+pip install -r build/requirements-build.txt
+python -m build.build_graph --region test-oberland --pbf switzerland-latest.osm.pbf --dem glo30
+tippecanoe -o out/.../network.pmtiles -l network -zg --drop-densest-as-needed out/.../network.geojson
+```
+
+`--dem swissalti3d` opts into the 2 m CH DEM later if 30 m slopes prove too coarse
+(that adapter is a documented shell; GLO-30 is the default and is implemented).
+
+A short-term Linux VPS beats Colab for a full national run: persistent disk (the
+resumable cache survives), no session cap, native tippecanoe. Colab is fine for
+the test region or a GLO-30 national run.
 
 ## Stages
 
@@ -21,10 +46,14 @@ python build/build_graph.py --region test-oberland --pbf switzerland-latest.osm.
 | `build_graph.py` | orchestrate | region resolution, resumable stage cache | pyrosm/DEM/tippecanoe/wrangler |
 
 The correctness-critical logic is pure and covered by the unit suite; only the
-loader, DEM sampler, tippecanoe and the R2 upload touch real data. A synthetic
-end-to-end test (`tests/test_pipeline_e2e.py`) runs a hand-built network through
-`measure → collapse → export` to a validated, routable `graph.bin` — proving the
-stages compose without any download.
+loader, DEM sampler, tippecanoe and the R2 upload touch real data. Two proofs:
+
+- **Synthetic** — `tests/test_pipeline_e2e.py` runs a hand-built network through
+  `measure → collapse → export` to a validated, routable `graph.bin`, no download.
+- **Real** — the pyrosm loader and the GLO-30 sampler were verified against a live
+  OSM extract + a real Copernicus tile, producing a real routable `graph.bin`.
+  (This isn't in the unit suite — it needs network + GDAL — but it's why the two
+  adapters are implemented, not stubbed.)
 
 ## Resolved design decisions (see specs.md)
 

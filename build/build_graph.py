@@ -1,7 +1,10 @@
 """Build orchestrator (build pipeline entry point).
 
-    python build/build_graph.py --region test-oberland
-    python build/build_graph.py --region switzerland          # the overnight run
+Run as a module from the repo root (``build`` collides with the PyPI package if
+you run the file directly):
+
+    python -m build.build_graph --region test-oberland --pbf switzerland-latest.osm.pbf
+    python -m build.build_graph --region switzerland  --pbf switzerland-latest.osm.pbf
 
 Sequences the stages -- OSM load -> DEM sample -> collapse -> export -- with a
 **resumable cache** under ``build/cache/<region>/``: the OSM and DEM stages are the
@@ -28,7 +31,7 @@ from typing import Callable, Final
 
 from build import export as export_mod
 from build.collapse import collapse_degree2
-from build.dem import MeasuredNetwork, Sampler, measure_network
+from build.dem import MeasuredNetwork, Sampler, make_sampler, measure_network
 from build.osm_load import RawNetwork, load_bike_network
 
 #: Where downloaded PBFs/DEM tiles and stage pickles live. Git-ignored.
@@ -142,23 +145,32 @@ def run_pipeline(
 # --------------------------------------------------------------------------- #
 
 
-def run_tippecanoe(geojson: Path, pmtiles: Path) -> None:  # pragma: no cover - external tool
-    """GeoJSON -> PMTiles. tippecanoe is Unix-only; on Windows call it via WSL.
+def tippecanoe_command(geojson: Path, pmtiles: Path) -> str:
+    """The tippecanoe invocation for the network GeoJSON -> PMTiles.
 
-    Not run by the unit suite. The exact zoom/detail flags are tuned during the
-    real build; the effort-coloring wants edges legible from mid zoom out.
+    `-zg` auto-picks max zoom; `--drop-densest-as-needed` keeps dense areas within
+    tile size limits; the effort-colouring wants edges legible from mid zoom out.
+    tippecanoe is Unix-only (native on a Linux server/Colab; WSL on Windows).
     """
-    raise NotImplementedError(
-        "run tippecanoe manually (WSL): "
-        f"tippecanoe -o {pmtiles} -l network -zg --drop-densest-as-needed {geojson}"
+    return (
+        f"tippecanoe -o {pmtiles} -l network -zg --drop-densest-as-needed "
+        f"--extend-zooms-if-still-dropping {geojson}"
     )
 
 
-def upload_to_r2(out_dir: Path, bucket: str) -> None:  # pragma: no cover - external tool
-    """Upload artefacts to R2 with wrangler. Prints the commands; the operator runs
-    them (wrangler touches Cloudflare)."""
-    for name in ("graph.bin", "meta.json", "network.pmtiles"):
-        print(f"wrangler r2 object put {bucket}/{name} --file {out_dir / name}")
+def upload_commands(out_dir: Path, bucket: str) -> list[str]:
+    """S3-style upload commands for the three artefacts (portable across servers).
+
+    Uses the R2 S3 endpoint via aws-cli, so it works headless anywhere with R2 API
+    credentials in the environment -- no interactive `wrangler login`. Set
+    ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY`` to an R2 token and
+    ``R2_ENDPOINT`` to ``https://<accountid>.r2.cloudflarestorage.com``.
+    """
+    ep = "$R2_ENDPOINT"
+    return [
+        f"aws s3 cp {out_dir / name} s3://{bucket}/{name} --endpoint-url {ep}"
+        for name in ("graph.bin", "meta.json", "network.pmtiles")
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -173,7 +185,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI wiring
     parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--force", action="store_true", help="ignore the stage cache")
-    parser.add_argument("--upload", metavar="BUCKET", help="print wrangler upload commands")
+    parser.add_argument(
+        "--dem", default="glo30", choices=["glo30", "swissalti3d"],
+        help="DEM source: glo30 (default, ~30 m, global, small) or swissalti3d (2 m, CH, ~40 GB)",
+    )
+    parser.add_argument("--upload", metavar="BUCKET", help="print R2 upload commands for the outputs")
     args = parser.parse_args(argv)
 
     region = resolve_region(args.region)
@@ -182,9 +198,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI wiring
 
     from datetime import date
 
-    from build.dem import SwissAlti3dSampler
-
-    sampler = SwissAlti3dSampler(str(args.cache / "dem"))
+    sampler = make_sampler(args.dem, str(args.cache / "dem"))
     graph = run_pipeline(
         region,
         build_date=date.today().isoformat(),
@@ -196,9 +210,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI wiring
     )
 
     region_out = args.out / region.name
-    _log("next: tippecanoe network.geojson -> network.pmtiles (see run_tippecanoe / WSL)")
+    _log("next -- build PMTiles then upload (or use build/run_build.sh / the Colab notebook):")
+    _log("  " + tippecanoe_command(region_out / "network.geojson", region_out / "network.pmtiles"))
     if args.upload:
-        upload_to_r2(region_out, args.upload)
+        for cmd in upload_commands(region_out, args.upload):
+            _log("  " + cmd)
     return 0 if graph.node_count else 1
 
 
