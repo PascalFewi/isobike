@@ -1,0 +1,64 @@
+:root {
+  --panel-bg: rgba(255, 255, 255, 0.94);
+  --net: #1a5fb4;
+  --client: #2a8a3e;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { margin: 0; height: 100%; }
+.app { position: absolute; inset: 0; }
+
+/* Control panel */
+.controls {
+  position: absolute; top: 12px; right: 12px; z-index: 10;
+  width: 260px; padding: 14px 16px;
+  background: var(--panel-bg); border-radius: 10px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18);
+  font-size: 13px;
+}
+.controls h1 { font-size: 18px; margin: 0 0 10px; }
+.controls hr { border: none; border-top: 1px solid #ddd; margin: 12px 0; }
+.controls label { display: block; margin: 10px 0; }
+.controls label.net { border-left: 3px solid var(--net); padding-left: 8px; }
+.controls label.client { border-left: 3px solid var(--client); padding-left: 8px; }
+.controls input[type='range'] { width: 100%; margin-top: 4px; }
+.controls select { width: 100%; margin-top: 4px; }
+.controls .ends { display: flex; justify-content: space-between; color: #666; font-size: 11px; }
+.controls .hint { color: var(--client); font-size: 11px; }
+.controls .checkbox { display: flex; align-items: center; gap: 6px; }
+.controls .checkbox input { width: auto; margin: 0; }
+.net-note { color: #666; font-size: 11px; line-height: 1.4; margin: 10px 0 0; }
+
+/* Legend */
+.legend {
+  position: absolute; bottom: 28px; left: 12px; z-index: 10;
+  padding: 10px 12px; background: var(--panel-bg); border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18); font-size: 12px;
+}
+.legend-title { font-weight: 600; margin-bottom: 6px; }
+.legend-row { display: flex; align-items: center; gap: 8px; margin: 2px 0; }
+.legend .swatch { width: 22px; height: 10px; border-radius: 2px; display: inline-block; }
+.legend-note { color: #666; font-size: 11px; margin-top: 6px; }
+
+/* Stats panel */
+.stats {
+  position: absolute; bottom: 28px; right: 12px; z-index: 10;
+  padding: 12px 16px; min-width: 180px;
+  background: var(--panel-bg); border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18);
+}
+.stats .close {
+  position: absolute; top: 6px; right: 8px; border: none; background: none;
+  font-size: 18px; cursor: pointer; color: #666;
+}
+.stat { display: flex; justify-content: space-between; gap: 16px; margin: 4px 0; font-size: 13px; }
+.stat span { color: #555; }
+.stat.unreachable { color: #b3261e; }
+
+/* Status line */
+.status {
+  position: absolute; bottom: 4px; left: 12px; z-index: 5;
+  font-size: 11px; color: #333; background: rgba(255, 255, 255, 0.7);
+  padding: 2px 6px; border-radius: 4px;
+}
