@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from build.binformat import Surface
-from build.collapse import collapse_degree2
+from build.collapse import collapse_degree2, prune_small_components
 from build.dem import MeasuredEdge, MeasuredNetwork
 
 
@@ -235,3 +235,46 @@ def test_collapse_conserves_total_distance() -> None:
     before = sum(e.dist_m for e in edges)
     after = sum(e.dist_m for e in collapse_degree2(_net(edges)).edges)
     assert after == pytest.approx(before)
+
+
+# --------------------------------------------------------------------------- #
+# Component pruning
+# --------------------------------------------------------------------------- #
+
+
+def _chain(start: int, length: int) -> list[MeasuredEdge]:
+    """A connected chain of `length` edges over `length+1` fresh node ids."""
+    return [_edge(start + i, start + i + 1) for i in range(length)]
+
+
+def test_prune_drops_small_components_keeps_the_big_one() -> None:
+    # One 10-edge component (11 nodes) + two tiny 1-edge stubs (2 nodes each).
+    net = _net([*_chain(0, 10), _edge(100, 101), _edge(200, 201)])
+    pruned = prune_small_components(net, min_component_nodes=5)
+    node_ids = set(pruned.node_lat)
+    assert node_ids == set(range(11))  # only the big chain survives
+    assert 100 not in node_ids and 200 not in node_ids
+
+
+def test_prune_always_keeps_the_largest_even_below_threshold() -> None:
+    net = _net(_chain(0, 3))  # 4 nodes, smaller than the threshold
+    pruned = prune_small_components(net, min_component_nodes=1000)
+    assert pruned.node_count == 4  # largest is never dropped
+
+
+def test_prune_keeps_components_at_or_above_threshold() -> None:
+    net = _net([*_chain(0, 20), *_chain(100, 6)])  # 21-node and 7-node components
+    pruned = prune_small_components(net, min_component_nodes=7)
+    assert set(pruned.node_lat) == set(range(21)) | set(range(100, 107))
+
+
+def test_prune_is_a_noop_on_a_single_component() -> None:
+    net = _net(_chain(0, 30))
+    pruned = prune_small_components(net, min_component_nodes=25)
+    assert pruned.edge_count == net.edge_count
+    assert pruned.node_count == net.node_count
+
+
+def test_prune_handles_an_empty_network() -> None:
+    empty = MeasuredNetwork({}, {}, {}, [])
+    assert prune_small_components(empty).edge_count == 0

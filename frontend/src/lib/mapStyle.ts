@@ -144,15 +144,39 @@ export function routeLayer(): LineLayerSpecification {
 }
 
 /**
- * The base style: a plain background plus the PMTiles network source. A basemap
- * (raster or vector) can be layered in via config for orientation; v1 keeps the
- * network the sole content so the effort colouring reads cleanly.
+ * swisstopo grey national map (`ch.swisstopo.pixelkarte-grau`): greyscale, so the
+ * viridis effort colours dominate, but with the Swiss relief hillshade + contours
+ * + topographic detail for real orientation -- the middle ground between a busy
+ * colour map and a flat grey one. Free, no key; CH coverage (all v1 needs).
+ *
+ * Alternatives (swap `BASEMAP_TILES`/attribution):
+ *   flat minimal (global) : https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png  (+ b,c,d)
+ *   full-colour terrain   : https://a.tile.opentopomap.org/{z}/{x}/{y}.png            (+ b,c)
+ */
+const BASEMAP_TILES = [
+  'https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-grau/default/current/3857/{z}/{x}/{y}.jpeg',
+];
+const BASEMAP_MAXZOOM = 19;
+const BASEMAP_ATTRIBUTION =
+  '© <a href="https://www.swisstopo.admin.ch" target="_blank" rel="noreferrer">swisstopo</a>';
+
+/**
+ * The base style: a muted greyscale basemap for orientation, plus the PMTiles
+ * network source. The effort-colouring line layers are added on top at runtime
+ * (see MapView), so they overlay the basemap.
  */
 export function buildStyle(): StyleSpecification {
   return {
     version: 8,
     glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
     sources: {
+      basemap: {
+        type: 'raster',
+        tiles: BASEMAP_TILES,
+        tileSize: 256,
+        maxzoom: BASEMAP_MAXZOOM,
+        attribution: BASEMAP_ATTRIBUTION,
+      },
       [EFFORT_SOURCE]: {
         type: 'vector',
         url: `pmtiles://${PMTILES_URL}`,
@@ -162,6 +186,7 @@ export function buildStyle(): StyleSpecification {
     },
     layers: [
       { id: 'bg', type: 'background', paint: { 'background-color': '#eef1f4' } },
+      { id: 'basemap', type: 'raster', source: 'basemap' },
     ],
   };
 }

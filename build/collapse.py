@@ -20,7 +20,7 @@ stays, which is exactly where the graph should keep its nodes.
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from typing import Final
 
@@ -239,9 +239,69 @@ def _walk_chain(
     )
 
 
+#: Default: drop weakly-connected components smaller than this. Small enough to
+#: keep any real neighbourhood, large enough to remove the disconnected stubs a
+#: bbox clip (test regions) or mapping errors leave behind. The largest component
+#: is always kept, whatever the threshold.
+DEFAULT_MIN_COMPONENT_NODES: Final = 25
+
+
+def prune_small_components(
+    net: MeasuredNetwork, min_component_nodes: int = DEFAULT_MIN_COMPONENT_NODES
+) -> MeasuredNetwork:
+    """Drop nodes/edges in weakly-connected components below a size threshold.
+
+    Standard routing-graph cleanup: a bikeable network is essentially one giant
+    connected component, and the rest are clipped fragments, private stubs or
+    mapping gaps a rider can never reach. Keeping them only produces tiny,
+    broken-looking effort fields when a click snaps onto one. The largest
+    component is always kept even if the threshold is set higher than its peers.
+
+    Weakly-connected (undirected) is the right lens here: it is what a rider can
+    reach ignoring one-way direction, which is what the effort field colours.
+    """
+    if net.edge_count == 0:
+        return net
+
+    parent: dict[int, int] = {}
+
+    def find(x: int) -> int:
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:  # path compression
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for e in net.edges:
+        parent.setdefault(e.u, e.u)
+        parent.setdefault(e.v, e.v)
+        union(e.u, e.v)
+
+    sizes = Counter(find(n) for n in parent)
+    largest_root = max(sizes, key=lambda r: sizes[r])
+    kept_roots = {r for r, s in sizes.items() if s >= min_component_nodes}
+    kept_roots.add(largest_root)
+
+    kept_edges = [e for e in net.edges if find(e.u) in kept_roots]
+    kept_nodes = {n for e in kept_edges for n in (e.u, e.v)}
+
+    return MeasuredNetwork(
+        node_lat={n: net.node_lat[n] for n in kept_nodes},
+        node_lon={n: net.node_lon[n] for n in kept_nodes},
+        node_elev={n: net.node_elev[n] for n in kept_nodes},
+        edges=kept_edges,
+    )
+
+
 #: Exposed for tests: how many geometric edges a network has.
 def edge_count(net: MeasuredNetwork) -> int:
     return len(net.edges)
 
 
-_ALL: Final = ("collapse_degree2", "edge_count")
+_ALL: Final = ("collapse_degree2", "prune_small_components", "edge_count")

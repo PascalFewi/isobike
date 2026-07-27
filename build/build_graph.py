@@ -30,7 +30,11 @@ from pathlib import Path
 from typing import Callable, Final
 
 from build import export as export_mod
-from build.collapse import collapse_degree2
+from build.collapse import (
+    DEFAULT_MIN_COMPONENT_NODES,
+    collapse_degree2,
+    prune_small_components,
+)
 from build.dem import MeasuredNetwork, Sampler, make_sampler, measure_network
 from build.osm_load import RawNetwork, load_bike_network
 
@@ -106,12 +110,13 @@ def run_pipeline(
     load_fn: Callable[[], RawNetwork],
     sampler: Sampler,
     force: bool = False,
+    min_component_nodes: int = DEFAULT_MIN_COMPONENT_NODES,
 ):
-    """Run OSM -> DEM -> collapse -> export, caching the two slow stages.
+    """Run OSM -> DEM -> collapse -> prune -> export, caching the two slow stages.
 
     ``load_fn`` and ``sampler`` are injected so the sequencing and caching are
     testable with synthetic data; ``main`` wires the real pyrosm loader and the
-    swissALTI3D sampler.
+    DEM sampler.
     """
     region_cache = cache_dir / region.name
     region_out = out_dir / region.name
@@ -129,9 +134,14 @@ def run_pipeline(
     collapsed = collapse_degree2(measured)
     _log(f"collapse: {measured.edge_count} -> {collapsed.edge_count} edges")
 
+    _log(f"prune: dropping components < {min_component_nodes} nodes...")
+    pruned = prune_small_components(collapsed, min_component_nodes)
+    _log(f"prune: {collapsed.node_count} -> {pruned.node_count} nodes, "
+         f"{collapsed.edge_count} -> {pruned.edge_count} edges")
+
     _log("export: writing graph.bin, network.geojson, meta.json...")
     graph = export_mod.export(
-        collapsed, region_out, region_id=region.region_id, build_date=build_date
+        pruned, region_out, region_id=region.region_id, build_date=build_date
     )
     _log(
         f"export: {graph.node_count} nodes, {graph.geom_edge_count} edges, "
@@ -190,6 +200,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI wiring
         help="DEM source: glo30 (default, ~30 m, global, small) or swissalti3d (2 m, CH, ~40 GB)",
     )
     parser.add_argument("--upload", metavar="BUCKET", help="print R2 upload commands for the outputs")
+    parser.add_argument(
+        "--min-component", type=int, default=DEFAULT_MIN_COMPONENT_NODES,
+        help="drop weakly-connected components smaller than this (routing-graph cleanup)",
+    )
     args = parser.parse_args(argv)
 
     region = resolve_region(args.region)
@@ -207,6 +221,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI wiring
         load_fn=lambda: load_bike_network(args.pbf, bbox=region.bbox),
         sampler=sampler,
         force=args.force,
+        min_component_nodes=args.min_component,
     )
 
     region_out = args.out / region.name

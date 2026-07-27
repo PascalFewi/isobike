@@ -69,7 +69,10 @@ export function MapView({
 
     m.on('load', () => {
       m.addLayer(effortLayer(fitnessFactor));
-      m.addLayer(ascentLayer(1));
+      // Cumulative-ascent second channel: implemented but OFF by default -- the
+      // dark-overlay rendering reads as noise over the time colours. Re-enable
+      // (ideally reworked as reduced saturation, or behind a toggle) later.
+      // m.addLayer(ascentLayer(1));
       m.addLayer(routeLayer());
       ready.current = true;
     });
