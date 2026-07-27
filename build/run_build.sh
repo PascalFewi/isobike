@@ -44,7 +44,9 @@ fi
 # --- 2. python deps (in a venv: fresh Ubuntu has no bare pip/python, and modern
 #        Ubuntu blocks installing into the system Python -- PEP 668) ------------ #
 log "setting up python venv + build deps"
-sudo apt-get update -qq && sudo apt-get install -y -qq python3 python3-venv
+# python3-dev + build-essential: some pyrosm deps (e.g. cykhash) have no wheel for
+# newer Python and compile from source, which needs Python.h and a C toolchain.
+sudo apt-get update -qq && sudo apt-get install -y -qq python3 python3-venv python3-dev build-essential
 python3 -m venv "$WORK/venv"
 # shellcheck disable=SC1091
 source "$WORK/venv/bin/activate"          # from here on, `python`/`pip` = the venv
