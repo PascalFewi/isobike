@@ -41,9 +41,15 @@ if ! command -v tippecanoe >/dev/null 2>&1; then
   sudo make -C "$tmp/tippecanoe" install >/dev/null
 fi
 
-# --- 2. python deps ----------------------------------------------------------- #
-log "installing python build deps"
-pip install -q -r "$REPO/build/requirements-build.txt"
+# --- 2. python deps (in a venv: fresh Ubuntu has no bare pip/python, and modern
+#        Ubuntu blocks installing into the system Python -- PEP 668) ------------ #
+log "setting up python venv + build deps"
+sudo apt-get update -qq && sudo apt-get install -y -qq python3 python3-venv
+python3 -m venv "$WORK/venv"
+# shellcheck disable=SC1091
+source "$WORK/venv/bin/activate"          # from here on, `python`/`pip` = the venv
+python -m pip install -q --upgrade pip
+python -m pip install -q -r "$REPO/build/requirements-build.txt"
 
 # --- 3. OSM extract ----------------------------------------------------------- #
 if [ -n "${PBF_PATH:-}" ]; then
@@ -72,7 +78,7 @@ ls -lh "$OUT"
 # --- 6. upload to R2 (optional) ----------------------------------------------- #
 if [ -n "${R2_BUCKET:-}" ] && [ -n "${R2_ENDPOINT:-}" ]; then
   log "uploading to R2 bucket $R2_BUCKET"
-  pip install -q awscli
+  python -m pip install -q awscli
   for f in graph.bin meta.json network.pmtiles; do
     aws s3 cp "$OUT/$f" "s3://$R2_BUCKET/$f" --endpoint-url "$R2_ENDPOINT"
   done
