@@ -55,8 +55,16 @@ def build_graph_binary(
     if net.edge_count == 0:
         raise ValueError("cannot export an empty network")
 
+    # Drop degenerate zero-length edges. Two distinct OSM nodes can round onto the
+    # same f32 coordinate (dense junctions, duplicate-node mapping errors), giving
+    # an edge of zero length -- no valid direction, and it trips the admissibility
+    # check. Dropping it is lossless for routing: its endpoints are the same place.
+    edges = [e for e in net.edges if e.dist_m > 0.0]
+    if not edges:
+        raise ValueError("no non-degenerate edges to export")
+
     # Contiguous node ids over exactly the endpoints that appear in edges.
-    osm_ids = sorted({n for e in net.edges for n in (e.u, e.v)})
+    osm_ids = sorted({n for e in edges for n in (e.u, e.v)})
     id_of = {osm_id: i for i, osm_id in enumerate(osm_ids)}
     n = len(osm_ids)
 
@@ -74,9 +82,9 @@ def build_graph_binary(
     ascent: list[float] = []
     descent: list[float] = []
     slope: list[int] = []
-    surface = np.empty(len(net.edges), dtype=np.uint8)
+    surface = np.empty(len(edges), dtype=np.uint8)
 
-    for eid, e in enumerate(net.edges):
+    for eid, e in enumerate(edges):
         surface[eid] = int(e.surface)
         u, v = id_of[e.u], id_of[e.v]
         if e.forward:

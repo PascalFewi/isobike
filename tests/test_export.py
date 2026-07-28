@@ -143,6 +143,33 @@ def test_export_rejects_empty_network() -> None:
         build_graph_binary(_net([]) if False else MeasuredNetwork({}, {}, {}, []), region_id="x")
 
 
+def test_export_drops_zero_length_edges() -> None:
+    """Two distinct OSM ids on the same f32 coordinate -> a zero-length edge that
+    must be dropped, not exported (it has no valid direction / trips validation)."""
+    p = _coord(0)
+    good = MeasuredEdge(
+        u=0, v=1, way_id=1, highway="residential", surface=bf.Surface.PAVED,
+        forward=True, backward=True, geometry=[_coord(0), _coord(1)],
+        dist_m=100.0,  # comfortably above the chord, like a real edge
+        ascent_m=1.0, descent_m=0.0, max_slope_pct_fwd=1.0, max_slope_pct_rev=1.0,
+    )
+    degenerate = MeasuredEdge(
+        u=2, v=3, way_id=2, highway="residential", surface=bf.Surface.PAVED,
+        forward=True, backward=True, geometry=[p, p], dist_m=0.0,
+        ascent_m=0.0, descent_m=0.0, max_slope_pct_fwd=0.0, max_slope_pct_rev=0.0,
+    )
+    net = MeasuredNetwork(
+        node_lat={0: _coord(0)[0], 1: _coord(1)[0], 2: p[0], 3: p[0]},
+        node_lon={0: _coord(0)[1], 1: _coord(1)[1], 2: p[1], 3: p[1]},
+        node_elev={n: 600.0 for n in (0, 1, 2, 3)},
+        edges=[good, degenerate],
+    )
+    graph = build_graph_binary(net, region_id="test")
+    bf.validate_graph(graph)
+    assert graph.geom_edge_count == 1  # the degenerate edge is gone
+    assert graph.node_count == 2  # nodes 2 and 3 vanish with it
+
+
 # --------------------------------------------------------------------------- #
 # Douglas-Peucker
 # --------------------------------------------------------------------------- #
