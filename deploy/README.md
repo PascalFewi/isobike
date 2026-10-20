@@ -28,8 +28,9 @@ folder, shared read-only with anyone who has the link:
 **https://drive.google.com/drive/folders/1L97boYC-ZaGXpImwEYwdY6MKjwFfNcEx**
 
 Upload exactly these four files from `build/out/switzerland/` after each
-national build, replacing the old ones (same names, flat in the folder, no
-subfolders):
+national build, replacing the old ones (same names; directly in the folder or in
+one subfolder such as `switzerland/`, but each file name only once, since the
+download script takes the first match):
 
 | file | size | used by | public on the site |
 |---|---|---|---|

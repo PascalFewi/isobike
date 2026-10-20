@@ -22,7 +22,8 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 echo "== downloading $DRIVE_FOLDER_URL"
-gdown --folder --remaining-ok -O "$tmp" "$DRIVE_FOLDER_URL"
+# No --remaining-ok: newer gdown dropped it, and the folder holds four files.
+gdown --folder -O "$tmp" "$DRIVE_FOLDER_URL"
 
 for f in "${FILES[@]}"; do
   found="$(find "$tmp" -type f -name "$f" | head -n1)"
