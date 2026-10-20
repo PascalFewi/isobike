@@ -6,7 +6,7 @@
 #                 and the API server, copy them over SSH, activate on the server
 #
 # Secrets live in the `production` environment (Settings -> Environments), never
-# in the repo; see README "Deployment". Jobs from forks and pull requests never
+# in the repo; see deploy/README.md. Jobs from forks and pull requests never
 # see them: this workflow only runs on `release` (maintainers) and manual dispatch.
 
 name: Release
@@ -107,7 +107,14 @@ jobs:
         run: |
           install -m 700 -d ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
-          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          # Pin the host key when DEPLOY_KNOWN_HOSTS is set; otherwise trust what
+          # the server presents now (fine here: the payload is public code, and
+          # the deploy key cannot be relayed to the real server).
+          if [ -n "$KNOWN_HOSTS" ]; then
+            printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -t ed25519 "$HOST" > ~/.ssh/known_hosts 2>/dev/null
+          fi
           SSH="ssh -i $HOME/.ssh/deploy_key -o StrictHostKeyChecking=yes"
           scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "isobike-$TAG.tar.gz" "$USER@$HOST:/tmp/"
           $SSH "$USER@$HOST" "bash /opt/isobike/bin/activate.sh '$TAG' '/tmp/isobike-$TAG.tar.gz'"

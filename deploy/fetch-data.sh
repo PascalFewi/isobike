@@ -6,7 +6,7 @@
 #
 #   sudo bash /opt/isobike/bin/fetch-data.sh
 #
-# Files expected (see README "Data"): graph.bin, geometry.bin, network.pmtiles,
+# Files expected (see deploy/README.md "Data"): graph.bin, geometry.bin, network.pmtiles,
 # meta.json. Downloaded into a temp dir first and moved into place only when all
 # four are there, so a failed download never leaves a half-updated data set.
 
