@@ -20,6 +20,7 @@ attributes but **no elevation** -- that is ``dem.py``'s job (step 2).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import IntEnum
 from typing import Final, Mapping
 
 from build.binformat import Surface
@@ -260,6 +261,47 @@ def classify_surface(tags: WayTags) -> Surface:
 
 
 # --------------------------------------------------------------------------- #
+# Structures (bridges / tunnels) -- where the DEM is not the road surface
+# --------------------------------------------------------------------------- #
+
+
+class Structure(IntEnum):
+    """Whether a way runs on the ground, over it, or under it.
+
+    A DEM models the ground, so on a bridge it returns the valley floor and in a
+    tunnel the mountain above. Sampling either invents climbs of tens of metres
+    and slopes that block the ``max_slope`` filter. ``dem.py`` therefore replaces
+    the profile of a non-``GROUND`` edge with a straight line between its two
+    endpoints, which sit on the abutments / portals and so are on the ground.
+    Build-time only; not stored in ``graph.bin``.
+    """
+
+    GROUND = 0
+    BRIDGE = 1
+    TUNNEL = 2
+
+
+#: ``tunnel`` values that are not underground: a passage through a building is at
+#: street level, where the (bare-earth) DEM is correct.
+_TUNNEL_AT_GROUND: Final[frozenset[str]] = frozenset({"no", "building_passage"})
+
+
+def classify_structure(tags: WayTags) -> Structure:
+    """Map ``bridge=*`` / ``tunnel=*`` onto :class:`Structure`.
+
+    Any ``bridge`` value but ``no`` is a bridge (``yes``, ``viaduct``,
+    ``boardwalk``, ``cantilever``, ...). Any ``tunnel`` value except ``no`` and
+    ``building_passage`` is a tunnel; that includes ``avalanche_protector``
+    galleries, whose roof is what a DEM sees. A way tagged both is a bridge.
+    """
+    if tags.get("bridge", "no") != "no":
+        return Structure.BRIDGE
+    if tags.get("tunnel", "no") not in _TUNNEL_AT_GROUND:
+        return Structure.TUNNEL
+    return Structure.GROUND
+
+
+# --------------------------------------------------------------------------- #
 # Raw network model (pre-elevation)
 # --------------------------------------------------------------------------- #
 
@@ -282,6 +324,7 @@ class RawEdge:
     forward: bool
     backward: bool
     geometry: list[tuple[float, float]]
+    structure: Structure = Structure.GROUND
 
 
 @dataclass
@@ -316,7 +359,9 @@ class RawNetwork:
 # Tags we read straight off pyrosm's edge columns when present. Everything else
 # we need (colon tags like oneway:bicycle, and tags pyrosm leaves un-promoted)
 # comes out of the row's `tags` JSON blob -- see _edge_tags.
-_COLUMN_TAGS: Final = ("highway", "surface", "oneway", "bicycle", "access", "service")
+_COLUMN_TAGS: Final = (
+    "highway", "surface", "oneway", "bicycle", "access", "service", "bridge", "tunnel",
+)
 _JSON_TAGS: Final = ("tracktype", "junction", "cycleway", "oneway:bicycle")
 
 
@@ -398,7 +443,7 @@ def load_bike_network(
             RawEdge(
                 u=u, v=v, way_id=int(way_ids[i]), highway=tags["highway"],
                 surface=classify_surface(tags), forward=forward, backward=backward,
-                geometry=geometry,
+                geometry=geometry, structure=classify_structure(tags),
             )
         )
 

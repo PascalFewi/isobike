@@ -13,6 +13,8 @@ from build.binformat import Surface
 from build.osm_load import (
     RawEdge,
     RawNetwork,
+    Structure,
+    classify_structure,
     classify_surface,
     edge_directions,
     included_highway,
@@ -258,3 +260,38 @@ def test_raw_network_accumulates_nodes_and_edges() -> None:
     assert net.node_count == 2
     assert net.edge_count == 1
     assert net.node_lat[1] == 46.5 and net.node_lon[2] == 8.1
+
+
+# --------------------------------------------------------------------------- #
+# Structures (bridge / tunnel)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("value", ["yes", "viaduct", "boardwalk", "cantilever", "movable"])
+def test_any_bridge_value_but_no_is_a_bridge(value: str) -> None:
+    assert classify_structure({"highway": "secondary", "bridge": value}) == Structure.BRIDGE
+
+
+@pytest.mark.parametrize("value", ["yes", "avalanche_protector", "culvert"])
+def test_tunnels_and_galleries_are_tunnels(value: str) -> None:
+    assert classify_structure({"highway": "secondary", "tunnel": value}) == Structure.TUNNEL
+
+
+@pytest.mark.parametrize("tags", [
+    {"highway": "residential"},
+    {"highway": "residential", "bridge": "no"},
+    {"highway": "residential", "tunnel": "no"},
+    {"highway": "residential", "tunnel": "building_passage"},  # at street level
+])
+def test_ground_level_ways(tags: dict[str, str]) -> None:
+    assert classify_structure(tags) == Structure.GROUND
+
+
+def test_a_way_tagged_bridge_and_tunnel_is_a_bridge() -> None:
+    assert classify_structure({"bridge": "yes", "tunnel": "yes"}) == Structure.BRIDGE
+
+
+def test_raw_edges_default_to_ground() -> None:
+    e = RawEdge(u=1, v=2, way_id=1, highway="residential", surface=Surface.PAVED,
+                forward=True, backward=True, geometry=[(46.5, 8.0), (46.6, 8.0)])
+    assert e.structure == Structure.GROUND

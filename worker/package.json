@@ -7,7 +7,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "seed:local": "wrangler r2 object put velorouter-graph/graph.bin --file ../testdata/ridge_world/graph.bin --local",
+    "seed:local": "wrangler r2 object put velorouter-graph-dev/graph.bin --file ../testdata/ridge_world/graph.bin --local",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "build:check": "wrangler deploy --dry-run --outdir dist"

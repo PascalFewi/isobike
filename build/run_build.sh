@@ -9,7 +9,7 @@
 #   REGION        build target: test-oberland (default) | switzerland
 #   PBF_URL       OSM extract to download (default: Geofabrik Switzerland)
 #   PBF_PATH      use a local .pbf instead of downloading
-#   DEM           glo30 (default, ~30 m, small) | swissalti3d (2 m, CH, ~40 GB)
+#   DEM           swissalti3d (default, 2 m bare earth, CH, ~30-40 GB) | glo30 (~30 m surface model, small)
 #   R2_BUCKET     if set with the AWS_* vars below, uploads the artefacts
 #   R2_ENDPOINT   https://<accountid>.r2.cloudflarestorage.com
 #   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY   an R2 API token
@@ -23,7 +23,7 @@
 set -euo pipefail
 
 REGION="${REGION:-test-oberland}"
-DEM="${DEM:-glo30}"
+DEM="${DEM:-swissalti3d}"
 PBF_URL="${PBF_URL:-https://download.geofabrik.de/europe/switzerland-latest.osm.pbf}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="${WORK:-$REPO/build}"

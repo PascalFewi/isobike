@@ -43,8 +43,8 @@ work locally, *then* do the national build + deploy (Phases 3–4).
 
 ## Phase 1 — Build the TEST region (anywhere, ~minutes)
 
-GLO-30 keeps this small, so a laptop, Colab, or a throwaway VPS all work. Needs
-Linux for `run_build.sh` (or WSL on Windows for the tippecanoe step).
+The test box needs ~600 swissALTI3D tiles (~0.6 GB), so a laptop, Colab, or a
+throwaway VPS all work. Needs Linux for `run_build.sh` (or WSL on Windows).
 
 - [ ] On the build machine, from the repo root:
       ```bash
@@ -62,7 +62,7 @@ Linux for `run_build.sh` (or WSL on Windows for the tippecanoe step).
 ✓ success: `meta.json` shows a few thousand+ nodes and edges, and all three files exist.
 
 > On Windows without WSL: run `python -m build.build_graph --region test-oberland
-> --pbf <path-to>.osm.pbf --dem glo30`, then run the `tippecanoe …` line it prints
+> --pbf <path-to>.osm.pbf`, then run the `tippecanoe …` line it prints
 > inside WSL.
 
 ---
@@ -74,7 +74,8 @@ See it work locally before deploying anything.
 - [ ] **Seed the local Worker's R2** with the test graph:
       ```bash
       cd worker
-      npx wrangler r2 object put velorouter-graph/graph.bin \
+      # `wrangler dev` reads the preview bucket (preview_bucket_name in wrangler.toml)
+      npx wrangler r2 object put velorouter-graph-dev/graph.bin \
         --file ../build/out/test-oberland/graph.bin --local
       ```
 - [ ] **Start the Worker:**
@@ -102,10 +103,11 @@ instantly.
 
 ---
 
-## Phase 3 — National build (on a VPS or Colab; hours, resumable)
+## Phase 3 — National build (desktop/WSL or a VPS; ~1-2 h, resumable)
 
-GLO-30 makes this hours, not an overnight 40 GB job. A short-term Linux VPS is
-ideal (persistent disk = the cache survives; no session cap; native tippecanoe).
+Downloads ~30-40 GB of swissALTI3D tiles once (cached), needs ~20 GB RAM. A
+desktop with WSL or a short-term Linux VPS is ideal (persistent disk = the cache
+survives; no session cap; native tippecanoe).
 
 - [ ] Run with the R2 upload env vars set, so it pushes straight to R2:
       ```bash

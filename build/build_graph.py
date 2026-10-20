@@ -6,7 +6,7 @@ you run the file directly):
     python -m build.build_graph --region test-oberland --pbf switzerland-latest.osm.pbf
     python -m build.build_graph --region switzerland  --pbf switzerland-latest.osm.pbf
 
-Sequences the stages -- OSM load -> DEM sample -> collapse -> export -- with a
+Sequences the stages -- OSM load -> collapse -> prune -> DEM sample -> export -- with a
 **resumable cache** under ``build/cache/<region>/``: the OSM and DEM stages are the
 slow ones, so their outputs are pickled and reused on a re-run unless ``--force``.
 The stage functions are the tested pure/near-pure ones from the other modules;
@@ -111,37 +111,50 @@ def run_pipeline(
     sampler: Sampler,
     force: bool = False,
     min_component_nodes: int = DEFAULT_MIN_COMPONENT_NODES,
+    dem: str = "dem",
 ):
-    """Run OSM -> DEM -> collapse -> prune -> export, caching the two slow stages.
+    """Run OSM -> collapse -> prune -> DEM -> export, caching the two slow stages.
 
-    ``load_fn`` and ``sampler`` are injected so the sequencing and caching are
-    testable with synthetic data; ``main`` wires the real pyrosm loader and the
-    DEM sampler.
+    Collapse comes *before* elevation so each road is measured as a whole (see
+    ``collapse.py``). ``load_fn`` and ``sampler`` are injected so the sequencing
+    and caching are testable with synthetic data; ``main`` wires the real pyrosm
+    loader and the DEM sampler. ``dem`` names the elevation cache, so switching
+    DEM source never reuses another source's measurements.
     """
     region_cache = cache_dir / region.name
     region_out = out_dir / region.name
 
-    raw = _cached_stage(region_cache / "raw.pkl", force, load_fn, "osm load")
-    assert isinstance(raw, RawNetwork)
-    _log(f"osm load: {raw.node_count} nodes, {raw.edge_count} edges")
+    def load_collapse_prune() -> RawNetwork:
+        # Versioned: v2 added RawEdge.structure. An old pickle would load without
+        # complaint and silently treat every bridge and tunnel as ground.
+        raw = _cached_stage(region_cache / "raw-v2.pkl", force, load_fn, "osm load")
+        assert isinstance(raw, RawNetwork)
+        _log(f"osm load: {raw.node_count} nodes, {raw.edge_count} edges")
+
+        _log("collapse: merging degree-2 chains...")
+        collapsed = collapse_degree2(raw)
+        _log(f"collapse: {raw.edge_count} -> {collapsed.edge_count} edges")
+        del raw
+
+        _log(f"prune: dropping components < {min_component_nodes} nodes...")
+        pruned = prune_small_components(collapsed, min_component_nodes)
+        _log(f"prune: {collapsed.node_count} -> {pruned.node_count} nodes, "
+             f"{collapsed.edge_count} -> {pruned.edge_count} edges")
+        return pruned
+
+    def measure() -> MeasuredNetwork:
+        # Only reached on a measured-cache miss; on a hit the raw network is never
+        # loaded at all (nationwide, raw + measured together strain a 24 GB box).
+        return measure_network(load_collapse_prune(), sampler)
 
     measured = _cached_stage(
-        region_cache / "measured.pkl", force, lambda: measure_network(raw, sampler), "dem sample"
+        region_cache / f"measured-{dem}-v2.pkl", force, measure, f"dem sample ({dem})"
     )
     assert isinstance(measured, MeasuredNetwork)
 
-    _log("collapse: merging degree-2 chains...")
-    collapsed = collapse_degree2(measured)
-    _log(f"collapse: {measured.edge_count} -> {collapsed.edge_count} edges")
-
-    _log(f"prune: dropping components < {min_component_nodes} nodes...")
-    pruned = prune_small_components(collapsed, min_component_nodes)
-    _log(f"prune: {collapsed.node_count} -> {pruned.node_count} nodes, "
-         f"{collapsed.edge_count} -> {pruned.edge_count} edges")
-
     _log("export: writing graph.bin, network.geojson, meta.json...")
     graph = export_mod.export(
-        pruned, region_out, region_id=region.region_id, build_date=build_date
+        measured, region_out, region_id=region.region_id, build_date=build_date
     )
     _log(
         f"export: {graph.node_count} nodes, {graph.geom_edge_count} edges, "
@@ -196,8 +209,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI wiring
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--force", action="store_true", help="ignore the stage cache")
     parser.add_argument(
-        "--dem", default="glo30", choices=["glo30", "swissalti3d"],
-        help="DEM source: glo30 (default, ~30 m, global, small) or swissalti3d (2 m, CH, ~40 GB)",
+        "--dem", default="swissalti3d", choices=["swissalti3d", "glo30"],
+        help="DEM source: swissalti3d (default; 2 m bare earth, CH, ~30-40 GB download) "
+             "or glo30 (~30 m surface model incl. trees/buildings, global, small)",
     )
     parser.add_argument("--upload", metavar="BUCKET", help="print R2 upload commands for the outputs")
     parser.add_argument(
@@ -222,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI wiring
         sampler=sampler,
         force=args.force,
         min_component_nodes=args.min_component,
+        dem=args.dem,
     )
 
     region_out = args.out / region.name

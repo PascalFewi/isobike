@@ -2,7 +2,7 @@
 
 A hand-built :class:`RawNetwork` (a lattice whose every edge is split by a
 degree-2 midpoint, with surfaces, one-ways and a hill) flows through the *real*
-pipeline stages -- ``measure_network`` -> ``collapse_degree2`` -> ``export`` -- to a
+pipeline stages -- ``collapse_degree2`` -> ``measure_network`` -> ``export`` -- to a
 validated ``graph.bin``, which is then read back and routed with the reference
 router. This proves the stages compose and produce a routable graph; the parts
 that touch real data (pyrosm, swissALTI3D, tippecanoe) are the operator's run.
@@ -93,10 +93,8 @@ def build_synthetic_raw() -> RawNetwork:
 
 @pytest.fixture(scope="module")
 def exported() -> bf.Graph:
-    raw = build_synthetic_raw()
-    measured = measure_network(raw, _elevation)
-    collapsed = collapse_degree2(measured)
-    return build_graph_binary(collapsed, region_id="synthetic-e2e")
+    collapsed = collapse_degree2(build_synthetic_raw())
+    return build_graph_binary(measure_network(collapsed, _elevation), region_id="synthetic-e2e")
 
 
 # --------------------------------------------------------------------------- #
@@ -106,14 +104,13 @@ def exported() -> bf.Graph:
 
 def test_collapse_removes_every_midpoint() -> None:
     raw = build_synthetic_raw()
-    measured = measure_network(raw, _elevation)
-    collapsed = collapse_degree2(measured)
+    collapsed = collapse_degree2(raw)
     # Every injected midpoint (id >= 10000) must be gone.
     assert all(nid < 10_000 for nid in collapsed.node_lat)
     # The four outer lattice corners are themselves degree-2 and legitimately
     # collapse (an L-bend is a pass-through), so fewer than all 36 corners remain.
     assert 28 <= collapsed.node_count < GRID * GRID
-    assert collapsed.edge_count < measured.edge_count
+    assert collapsed.edge_count < raw.edge_count
 
 
 def test_exported_graph_is_valid(exported: bf.Graph) -> None:

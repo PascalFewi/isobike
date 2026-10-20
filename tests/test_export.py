@@ -170,6 +170,47 @@ def test_export_drops_zero_length_edges() -> None:
     assert graph.node_count == 2  # nodes 2 and 3 vanish with it
 
 
+def test_geojson_edge_ids_match_graph_after_dropping_a_degenerate_edge() -> None:
+    """The frontend joins the effort field to the tiles by edge_id. A degenerate
+    edge dropped from graph.bin but not from the GeoJSON shifts every later id by
+    one -- colours land on unrelated roads. Put it *first* so the shift shows."""
+    good = _net([_edge(0, 1, surface=bf.Surface.GRAVEL), _edge(1, 2), _edge(2, 3)])
+    # Nodes 8 and 9 share one coordinate; built by hand because _net would bump
+    # dist up to the chord of their distinct fixture coordinates.
+    p = _coord(9)
+    degenerate = _edge(8, 9, dist=0.0, ascent=0.0, descent=0.0, geometry=[p, p])
+    net = MeasuredNetwork(
+        node_lat={**good.node_lat, 8: p[0], 9: p[0]},
+        node_lon={**good.node_lon, 8: p[1], 9: p[1]},
+        node_elev={**good.node_elev, 8: 600.0, 9: 600.0},
+        edges=[degenerate, *good.edges],
+    )
+
+    graph = build_graph_binary(net, region_id="test")
+    features = network_to_geojson(net)["features"]
+    assert len(features) == graph.geom_edge_count == 3
+
+    for f in features:
+        eid = f["properties"]["edge_id"]
+        # The graph's half-edges carrying this edge_id must join the same two
+        # coordinates as the GeoJSON feature's endpoints.
+        halves = np.flatnonzero(graph.edge_id == eid)
+        assert halves.size > 0
+        e = halves[0]
+        src = int(np.searchsorted(graph.csr_offset, e, side="right") - 1)
+        dst = int(graph.edge_target[e])
+        graph_ends = {
+            (float(graph.node_lon[src]), float(graph.node_lat[src])),
+            (float(graph.node_lon[dst]), float(graph.node_lat[dst])),
+        }
+        coords = f["geometry"]["coordinates"]
+        feature_ends = {
+            (float(np.float32(coords[0][0])), float(np.float32(coords[0][1]))),
+            (float(np.float32(coords[-1][0])), float(np.float32(coords[-1][1]))),
+        }
+        assert graph_ends == feature_ends, f"edge_id {eid} points at a different road"
+
+
 # --------------------------------------------------------------------------- #
 # Douglas-Peucker
 # --------------------------------------------------------------------------- #

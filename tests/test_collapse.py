@@ -1,6 +1,8 @@
-"""Degree-2 collapse: the ascent-summing trap and the topology rules.
+"""Degree-2 collapse: the topology rules, on the raw (pre-elevation) network.
 
-Pure functions on hand-built MeasuredNetworks with known answers.
+Pure functions on hand-built RawNetworks with known answers. Collapse runs before
+elevation is measured, so the ascent/slope behaviour across a merged chain is
+tested where it is computed -- ``test_dem.py`` (measure after collapse).
 """
 
 from __future__ import annotations
@@ -9,43 +11,45 @@ import pytest
 
 from build.binformat import Surface
 from build.collapse import collapse_degree2, prune_small_components
-from build.dem import MeasuredEdge, MeasuredNetwork
+from build.dem import polyline_length_m
+from build.osm_load import RawEdge, RawNetwork, Structure
+
+
+def _coord(n: int) -> tuple[float, float]:
+    return (46.5 + n * 1e-3, 8.0 + n * 1e-3)
 
 
 def _edge(
     u: int,
     v: int,
     *,
-    dist: float = 100.0,
-    ascent: float = 0.0,
-    descent: float = 0.0,
-    slope_fwd: float = 0.0,
-    slope_rev: float = 0.0,
     surface: Surface = Surface.PAVED,
     highway: str = "residential",
+    structure: Structure = Structure.GROUND,
     forward: bool = True,
     backward: bool = True,
-) -> MeasuredEdge:
-    return MeasuredEdge(
+) -> RawEdge:
+    return RawEdge(
         u=u, v=v, way_id=1, highway=highway, surface=surface,
-        forward=forward, backward=backward,
-        geometry=[(46.5 + u * 1e-3, 8.0 + u * 1e-3), (46.5 + v * 1e-3, 8.0 + v * 1e-3)],
-        dist_m=dist, ascent_m=ascent, descent_m=descent,
-        max_slope_pct_fwd=slope_fwd, max_slope_pct_rev=slope_rev,
+        forward=forward, backward=backward, geometry=[_coord(u), _coord(v)],
+        structure=structure,
     )
 
 
-def _net(edges: list[MeasuredEdge]) -> MeasuredNetwork:
+def _net(edges: list[RawEdge]) -> RawNetwork:
     nodes = {n for e in edges for n in (e.u, e.v)}
-    return MeasuredNetwork(
-        node_lat={n: 46.5 + n * 1e-3 for n in nodes},
-        node_lon={n: 8.0 + n * 1e-3 for n in nodes},
-        node_elev={n: 600.0 + n for n in nodes},
+    return RawNetwork(
+        node_lat={n: _coord(n)[0] for n in nodes},
+        node_lon={n: _coord(n)[1] for n in nodes},
         edges=edges,
     )
 
 
-def _only(net: MeasuredNetwork) -> MeasuredEdge:
+def _length(net: RawNetwork) -> float:
+    return sum(polyline_length_m(e.geometry) for e in net.edges)
+
+
+def _only(net: RawNetwork) -> RawEdge:
     assert len(net.edges) == 1, f"expected 1 edge, got {len(net.edges)}"
     return net.edges[0]
 
@@ -60,7 +64,7 @@ def test_a_straight_chain_becomes_one_edge() -> None:
     net = collapse_degree2(_net([_edge(0, 1), _edge(1, 2), _edge(2, 3)]))
     e = _only(net)
     assert {e.u, e.v} == {0, 3}
-    assert e.dist_m == pytest.approx(300.0)
+    assert e.geometry[0] == _coord(e.u) and e.geometry[-1] == _coord(e.v)
     assert net.node_count == 2  # interior nodes 1,2 removed
 
 
@@ -81,55 +85,31 @@ def test_dead_end_chain_collapses_to_its_junction_and_tip() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# The ascent-summing trap
+# Orientation
 # --------------------------------------------------------------------------- #
 
 
-def test_ascent_and_descent_sum_across_the_chain() -> None:
-    # 0 ->(+10) 1 ->(+5,-3) 2 ->(+2) 3
+def test_segments_stored_against_the_walk_are_reversed_into_one_polyline() -> None:
+    """0-1 stored (1,0) and 1-2 stored (2,1): the merged geometry must still run
+    continuously 0 -> 1 -> 2 (or its exact reverse), or the profile measured
+    along it would be scrambled."""
+    net = collapse_degree2(_net([_edge(1, 0), _edge(2, 1)]))
+    e = _only(net)
+    expected = [_coord(0), _coord(1), _coord(2)]
+    assert e.geometry in (expected, expected[::-1])
+    assert e.geometry[0] == _coord(e.u)
+
+
+def test_a_flipped_oneway_segment_keeps_its_direction_after_merging() -> None:
+    # 0 -> 1 one-way stored forward, 1 -> 2 one-way stored as (2, 1) backward-only.
     net = collapse_degree2(_net([
-        _edge(0, 1, ascent=10.0, descent=0.0),
-        _edge(1, 2, ascent=5.0, descent=3.0),
-        _edge(2, 3, ascent=2.0, descent=0.0),
+        _edge(0, 1, forward=True, backward=False),
+        _edge(2, 1, forward=False, backward=True),
     ]))
     e = _only(net)
-    assert e.ascent_m == pytest.approx(17.0)
-    assert e.descent_m == pytest.approx(3.0)
-
-
-def test_a_hump_in_the_chain_survives_collapse() -> None:
-    """The trap: level endpoints, but the middle went up and came back down."""
-    net = collapse_degree2(_net([
-        _edge(0, 1, ascent=14.0, descent=0.0),   # climb the hump
-        _edge(1, 2, ascent=0.0, descent=14.0),   # descend it
-    ]))
-    e = _only(net)
-    # Endpoint elevations of 0 and 2 could be equal; ascent must still be 14.
-    assert e.ascent_m == pytest.approx(14.0)
-    assert e.descent_m == pytest.approx(14.0)
-
-
-def test_orientation_flip_swaps_ascent_and_descent() -> None:
-    # Edges stored against the walk direction: 0-1 stored (1,0), 1-2 stored (2,1).
-    net = collapse_degree2(_net([
-        _edge(1, 0, ascent=0.0, descent=10.0),   # walking 0->1 climbs 10
-        _edge(2, 1, ascent=0.0, descent=5.0),    # walking 1->2 climbs 5
-    ]))
-    e = _only(net)
-    # Whichever endpoint order the result uses, the |ascent-descent| net is 15.
-    assert abs(e.ascent_m - e.descent_m) == pytest.approx(15.0)
-    assert e.ascent_m + e.descent_m == pytest.approx(15.0)
-
-
-def test_max_slope_is_the_chain_maximum() -> None:
-    net = collapse_degree2(_net([
-        _edge(0, 1, slope_fwd=4.0, slope_rev=1.0),
-        _edge(1, 2, slope_fwd=9.0, slope_rev=2.0),
-        _edge(2, 3, slope_fwd=6.0, slope_rev=3.0),
-    ]))
-    e = _only(net)
-    assert e.max_slope_pct_fwd == pytest.approx(9.0)
-    assert e.max_slope_pct_rev == pytest.approx(3.0)
+    walk_0_to_2 = e.forward if (e.u, e.v) == (0, 2) else e.backward
+    walk_2_to_0 = e.backward if (e.u, e.v) == (0, 2) else e.forward
+    assert walk_0_to_2 is True and walk_2_to_0 is False
 
 
 # --------------------------------------------------------------------------- #
@@ -153,6 +133,22 @@ def test_highway_class_boundary_is_preserved() -> None:
         _edge(1, 2, highway="track"),
     ]))
     assert len(net.edges) == 2
+
+
+@pytest.mark.parametrize("structure", [Structure.BRIDGE, Structure.TUNNEL])
+def test_a_structure_boundary_is_preserved(structure: Structure) -> None:
+    """A bridge/tunnel stays its own edge, so dem.py can straighten its profile
+    without flattening the approach roads with it."""
+    net = collapse_degree2(_net([
+        _edge(0, 1),
+        _edge(1, 2, structure=structure),
+        _edge(2, 3, structure=structure),
+        _edge(3, 4),
+    ]))
+    by_ends = {frozenset({e.u, e.v}): e for e in net.edges}
+    assert set(by_ends) == {frozenset({0, 1}), frozenset({1, 3}), frozenset({3, 4})}
+    assert by_ends[frozenset({1, 3})].structure == structure
+    assert by_ends[frozenset({0, 1})].structure == Structure.GROUND
 
 
 def test_homogeneous_chain_keeps_its_surface() -> None:
@@ -218,8 +214,8 @@ def test_isolated_triangle_is_left_intact() -> None:
     net = collapse_degree2(_net([_edge(0, 1), _edge(1, 2), _edge(2, 0)]))
     # It collapses to a single self-loop-free representation or stays a ring;
     # either way no node/edge is lost and total distance is conserved.
-    total = sum(e.dist_m for e in net.edges)
-    assert total == pytest.approx(300.0)
+    total = _length(net)
+    assert total == pytest.approx(_length(_net([_edge(0, 1), _edge(1, 2), _edge(2, 0)])))
     assert all(e.u != e.v or len(net.edges) == 1 for e in net.edges)
 
 
@@ -230,11 +226,9 @@ def test_geometry_is_concatenated_without_duplicating_junctions() -> None:
     assert len(e.geometry) == 3
 
 
-def test_collapse_conserves_total_distance() -> None:
-    edges = [_edge(i, i + 1, dist=float(10 * (i + 1))) for i in range(5)]
-    before = sum(e.dist_m for e in edges)
-    after = sum(e.dist_m for e in collapse_degree2(_net(edges)).edges)
-    assert after == pytest.approx(before)
+def test_collapse_conserves_total_length() -> None:
+    edges = [_edge(i, i + 1) for i in range(5)]
+    assert _length(collapse_degree2(_net(edges))) == pytest.approx(_length(_net(edges)))
 
 
 # --------------------------------------------------------------------------- #
@@ -242,7 +236,7 @@ def test_collapse_conserves_total_distance() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _chain(start: int, length: int) -> list[MeasuredEdge]:
+def _chain(start: int, length: int) -> list[RawEdge]:
     """A connected chain of `length` edges over `length+1` fresh node ids."""
     return [_edge(start + i, start + i + 1) for i in range(length)]
 
@@ -276,5 +270,5 @@ def test_prune_is_a_noop_on_a_single_component() -> None:
 
 
 def test_prune_handles_an_empty_network() -> None:
-    empty = MeasuredNetwork({}, {}, {}, [])
+    empty = RawNetwork()
     assert prune_small_components(empty).edge_count == 0

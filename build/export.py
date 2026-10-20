@@ -26,7 +26,7 @@ from typing import Any, Final, Sequence
 import numpy as np
 
 from build import binformat as bf
-from build.dem import MeasuredNetwork
+from build.dem import MeasuredEdge, MeasuredNetwork
 from build.geo import local_xy
 
 #: Douglas-Peucker tolerance for the display geometry, in metres. The routing
@@ -37,6 +37,21 @@ GEOJSON_SIMPLIFY_M: Final = 20.0
 # --------------------------------------------------------------------------- #
 # graph.bin
 # --------------------------------------------------------------------------- #
+
+
+def exportable_edges(net: MeasuredNetwork) -> list[MeasuredEdge]:
+    """The edges that get an ``edge_id``, in ``edge_id`` order.
+
+    Drops degenerate zero-length edges. Two distinct OSM nodes can round onto the
+    same f32 coordinate (dense junctions, duplicate-node mapping errors), giving
+    an edge of zero length -- no valid direction, and it trips the admissibility
+    check. Dropping it is lossless for routing: its endpoints are the same place.
+
+    ``graph.bin`` and ``network.geojson`` must both number edges from this one
+    list: the frontend joins the effort field to the tiles by ``edge_id``, so any
+    divergence shifts every later id and paints colours onto unrelated roads.
+    """
+    return [e for e in net.edges if e.dist_m > 0.0]
 
 
 def build_graph_binary(
@@ -55,11 +70,7 @@ def build_graph_binary(
     if net.edge_count == 0:
         raise ValueError("cannot export an empty network")
 
-    # Drop degenerate zero-length edges. Two distinct OSM nodes can round onto the
-    # same f32 coordinate (dense junctions, duplicate-node mapping errors), giving
-    # an edge of zero length -- no valid direction, and it trips the admissibility
-    # check. Dropping it is lossless for routing: its endpoints are the same place.
-    edges = [e for e in net.edges if e.dist_m > 0.0]
+    edges = exportable_edges(net)
     if not edges:
         raise ValueError("no non-degenerate edges to export")
 
@@ -209,7 +220,7 @@ def network_to_geojson(net: MeasuredNetwork, *, simplify_m: float = GEOJSON_SIMP
     toggle.
     """
     features: list[dict[str, Any]] = []
-    for eid, e in enumerate(net.edges):
+    for eid, e in enumerate(exportable_edges(net)):
         simplified = douglas_peucker(e.geometry, simplify_m)
         features.append(
             {
