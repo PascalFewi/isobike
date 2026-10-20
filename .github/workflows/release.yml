@@ -106,7 +106,11 @@ jobs:
           USER: ${{ secrets.DEPLOY_USER }}
         run: |
           install -m 700 -d ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          # tr: a key pasted from Windows carries CRLF, which OpenSSH rejects
+          # ("error in libcrypto").
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null \
+            || { echo "::error::DEPLOY_SSH_KEY is not a readable private key (pasted the .pub, or BEGIN/END lines missing?)"; exit 1; }
           # Pin the host key when DEPLOY_KNOWN_HOSTS is set; otherwise trust what
           # the server presents now (fine here: the payload is public code, and
           # the deploy key cannot be relayed to the real server).
