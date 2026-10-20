@@ -3,9 +3,9 @@
  * units), and parses the responses.
  *
  * Note what does and does not go on the wire: the Profil speeds and the surface
- * / slope filters DO (they change the route), the Fitness factor does NOT -- it is
- * a client-side rescale (see profile.ts). Keeping that boundary here is what makes
- * the Fitness slider instant.
+ * / slope filters DO (they change the route), the rider's flat speed does NOT --
+ * it is a client-side rescale (see profile.ts). Keeping that boundary here is
+ * what makes the speed slider instant.
  */
 
 import { WORKER_URL, DEFAULT_BUDGET_S } from '../config.ts';
@@ -39,6 +39,8 @@ export interface RouteResult {
   readonly max_slope_pct?: number;
   readonly edge_ids?: number[];
   readonly nodes?: number[];
+  /** Full polyline `[lon, lat, elevation_m]`, when the Worker has geometry.bin. */
+  readonly geometry?: Array<[number, number, number]>;
 }
 
 export interface LatLon {
@@ -70,9 +72,13 @@ export async function snap(at: LatLon): Promise<SnapResult> {
   return (await res.json()) as SnapResult;
 }
 
+/** Cell size of the min-time grid the Worker returns for isolines, km. */
+export const GRID_KM = 1;
+
 /**
- * `POST /effort-field` -> binary reachability field. Uses the Profil speeds and
- * the default time budget; the Fitness factor is applied afterwards, client-side.
+ * `POST /effort-field` -> binary reachability field plus the isoline grid. Uses
+ * the Profil speeds; `budgetS` is in *Worker* seconds (at profile speeds). The
+ * rider's flat speed is applied afterwards, client-side.
  */
 export async function effortField(
   at: LatLon,
@@ -86,6 +92,7 @@ export async function effortField(
     v_flat: speeds.vFlatMps,
     vam: speeds.vamMps,
     max_cost: budgetS,
+    grid_km: GRID_KM,
     ...filterBody(filters),
   };
   const res = await fetch(`${WORKER_URL}/effort-field`, {

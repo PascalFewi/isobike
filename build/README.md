@@ -70,7 +70,7 @@ what lets the 200 m slope window smooth anything (see `collapse.py`).
 
 ## Resumable cache
 
-`build/cache/<region>/{raw-v2,measured-<dem>-v2}.pkl` hold the two slow stages; a
+`build/cache/<region>/{raw-v2,measured-<dem>-v3}.pkl` hold the two slow stages; a
 re-run reuses them unless `--force` (delete `measured-*.pkl` after changing the
 measuring code). DEM tiles cache under `build/cache/dem/` (swissALTI3D in
 `build/cache/dem/swissalti3d/`, with its STAC tile index). Both are

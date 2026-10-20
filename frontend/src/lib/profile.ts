@@ -1,19 +1,20 @@
 /**
- * Rider profile (Profil slider) and Fitness slider -- the two speed controls that
- * replaced the old alpha slider.
+ * Rider profile (Profil slider) and flat speed (Geschwindigkeit im Flachen).
  *
  * **Profil** sets the *ratio* v_flat : vam, i.e. how much a rider trades distance
  * for climbing. It changes route choice, so moving it triggers a Worker call.
  *
- * **Fitness** scales v_flat and vam by the *same* factor. Because every cost is
- * `dist/v_flat + ascent/vam`, scaling both by f divides every time by f -- the
- * optimum path is unchanged, only the absolute times move. So Fitness is applied
+ * **Flat speed** sets the absolute pace: the rider's v_flat, with vam following
+ * at the profile's ratio. That scales v_flat and vam by the *same* factor, and
+ * because every cost is `dist/v_flat + ascent/vam`, every time divides by that
+ * factor while the optimum path stays the same. So the speed slider is applied
  * **purely client-side** by rescaling the received times and the colour-band
- * boundaries; it MUST NOT trigger a Worker call or re-route. See {@link applyFitness}.
+ * boundaries; it MUST NOT trigger a Worker call or re-route. See
+ * {@link speedFactor} and {@link displayTime}.
  *
- * Accuracy note (accepted for v1): real fitness improves VAM more than flat speed,
- * so scaling both equally is a simplification -- but it makes the Fitness slider
- * free and instant, which is the point.
+ * Accuracy note (accepted for v1): a faster rider usually gains more on climbs
+ * than on the flat, so scaling both equally is a simplification -- but it makes
+ * the slider free and instant, which is the point.
  */
 
 /** A rider profile in the units the Worker API expects: metres per second. */
@@ -40,8 +41,8 @@ export const PROFILE_ANCHORS: ReadonlyArray<{ label: string; kmh: number; hmh: n
 
 /**
  * Map the Profil slider (0 = Flach .. 1 = Gebirge) to speeds by piecewise-linear
- * interpolation across the three anchors. A continuous slider feels better than
- * three notches while still passing through the named presets.
+ * interpolation across the three anchors. These speeds go to the Worker; only
+ * their ratio matters for the route.
  */
 export function profileToSpeeds(t: number): Speeds {
   const clamped = Math.min(1, Math.max(0, t));
@@ -53,22 +54,25 @@ export function profileToSpeeds(t: number): Speeds {
   return fromKmh(a.kmh + (b.kmh - a.kmh) * frac, a.hmh + (b.hmh - a.hmh) * frac);
 }
 
-/** Fitness multiplier range for the slider (0 = 0.7x, 1 = 1.3x). */
-export const FITNESS_MIN = 0.7;
-export const FITNESS_MAX = 1.3;
-
-export function fitnessToFactor(t: number): number {
-  const clamped = Math.min(1, Math.max(0, t));
-  return FITNESS_MIN + (FITNESS_MAX - FITNESS_MIN) * clamped;
-}
+/** Flat speed slider: range and default, km/h. */
+export const FLAT_KMH_MIN = 15;
+export const FLAT_KMH_MAX = 40;
+export const FLAT_KMH_DEFAULT = 25;
 
 /**
- * Rescale a Worker-computed time by the Fitness factor -- **client-side only**.
- *
- * A fitter rider (factor > 1) is faster, so their time is smaller: `t / factor`.
- * This is applied to every displayed time and to the band boundaries, never sent
- * to the Worker.
+ * How much faster the rider is than the profile speeds the Worker routed with:
+ * `rider v_flat / profile v_flat`. Times divide by this -- **client-side only**.
  */
-export function applyFitness(timeSeconds: number, factor: number): number {
-  return timeSeconds / factor;
+export function speedFactor(flatKmh: number, profile: Speeds): number {
+  return (flatKmh * KMH_TO_MPS) / profile.vFlatMps;
+}
+
+/** The rider's VAM at this flat speed and profile ratio, Hm/h -- for display. */
+export function riderVamHmh(flatKmh: number, profile: Speeds): number {
+  return (profile.vamMps * speedFactor(flatKmh, profile)) / HMH_TO_MPS;
+}
+
+/** A Worker time (at profile speeds) as the rider's time: `t / factor`. */
+export function displayTime(workerSeconds: number, factor: number): number {
+  return workerSeconds / factor;
 }

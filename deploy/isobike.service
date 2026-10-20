@@ -1,0 +1,29 @@
+# systemd unit for the isobike routing API. Installed to
+# /etc/systemd/system/isobike.service by deploy/setup-server.sh.
+
+[Unit]
+Description=isobike routing API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=isobike
+Group=isobike
+WorkingDirectory=/opt/isobike/current/server
+ExecStart=/usr/bin/node dist/main.js
+Environment=NODE_ENV=production
+Environment=DATA_DIR=/opt/isobike/data
+Environment=HOST=127.0.0.1
+Environment=PORT=8080
+Restart=always
+RestartSec=3
+
+# Hardening: the API only reads its data and listens on localhost.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/opt/isobike
+
+[Install]
+WantedBy=multi-user.target

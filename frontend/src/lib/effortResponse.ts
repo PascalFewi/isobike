@@ -1,10 +1,12 @@
 /**
- * Parser for the Worker's `/effort-field` binary response (VEFF).
+ * Parser for the Worker's `/effort-field` binary response (VEFF v2).
  *
  * Mirrors `worker/src/protocol.ts` -- the same 32-byte header then three parallel
- * arrays (edge_id u32, time f32, cum_ascent f32). The layout is a cross-boundary
- * contract; `frontend/test/effortResponse.test.ts` checks this parser against a
- * fixture emitted by the worker's own serializer, so drift is caught.
+ * arrays (edge_id u32, time f32, cum_ascent f32), optionally followed by a grid
+ * trailer ("VGRD") with the minimum minutes per map cell, which the client turns
+ * into isolines at low zoom. The layout is a cross-boundary contract;
+ * `frontend/test/effortResponse.test.ts` checks this parser against a fixture
+ * emitted by the worker's own serializer, so drift is caught.
  *
  * Views are zero-copy over the received ArrayBuffer -- a nationwide field is
  * ~16 MB, so copying it would be wasteful; the typed arrays are read straight
@@ -12,8 +14,24 @@
  */
 
 const MAGIC = 'VEFF';
-const FORMAT_VERSION = 1;
+const FORMAT_VERSION = 2;
 const HEADER_SIZE = 32;
+const GRID_MAGIC = 'VGRD';
+const GRID_HEADER_SIZE = 32;
+/** Grid cell value for "no reachable road here". */
+export const GRID_NONE = 65535;
+
+export interface EffortGrid {
+  readonly nx: number;
+  readonly ny: number;
+  /** West edge of column 0 / north edge of row 0, degrees. */
+  readonly westLon: number;
+  readonly northLat: number;
+  readonly cellLonDeg: number;
+  readonly cellLatDeg: number;
+  /** Minutes, row-major north -> south; {@link GRID_NONE} where nothing is reached. */
+  readonly minutes: Uint16Array;
+}
 
 export interface EffortField {
   readonly count: number;
@@ -27,6 +45,14 @@ export interface EffortField {
   readonly edgeIds: Uint32Array;
   readonly times: Float32Array;
   readonly cumAscents: Float32Array;
+  /** Present when the request asked for `grid_km`. */
+  readonly grid: EffortGrid | null;
+}
+
+function ascii(bytes: Uint8Array, at: number): string {
+  let s = '';
+  for (let i = 0; i < 4; i++) s += String.fromCharCode(bytes[at + i]);
+  return s;
 }
 
 export function parseEffortField(buffer: ArrayBuffer): EffortField {
@@ -36,17 +62,33 @@ export function parseEffortField(buffer: ArrayBuffer): EffortField {
   const view = new DataView(buffer);
   const bytes = new Uint8Array(buffer);
 
-  let magic = '';
-  for (let i = 0; i < 4; i++) magic += String.fromCharCode(bytes[i]);
+  const magic = ascii(bytes, 0);
   if (magic !== MAGIC) throw new Error(`bad effort-field magic ${JSON.stringify(magic)}`);
   if (view.getUint16(4, true) !== FORMAT_VERSION) {
     throw new Error('unsupported effort-field version');
   }
 
   const count = view.getUint32(8, true);
-  const expected = HEADER_SIZE + 12 * count;
-  if (buffer.byteLength !== expected) {
-    throw new Error(`effort-field truncated: ${buffer.byteLength} bytes, expected ${expected}`);
+  const body = HEADER_SIZE + 12 * count;
+  let grid: EffortGrid | null = null;
+  if (buffer.byteLength > body) {
+    if (ascii(bytes, body) !== GRID_MAGIC) throw new Error('effort-field has trailing bytes without a grid');
+    const nx = view.getUint32(body + 4, true);
+    const ny = view.getUint32(body + 8, true);
+    if (buffer.byteLength !== body + GRID_HEADER_SIZE + 2 * nx * ny) {
+      throw new Error('effort-field grid truncated');
+    }
+    grid = {
+      nx,
+      ny,
+      westLon: view.getFloat32(body + 12, true),
+      northLat: view.getFloat32(body + 16, true),
+      cellLonDeg: view.getFloat32(body + 20, true),
+      cellLatDeg: view.getFloat32(body + 24, true),
+      minutes: new Uint16Array(buffer, body + GRID_HEADER_SIZE, nx * ny),
+    };
+  } else if (buffer.byteLength !== body) {
+    throw new Error(`effort-field truncated: ${buffer.byteLength} bytes, expected ${body}`);
   }
 
   return {
@@ -59,5 +101,6 @@ export function parseEffortField(buffer: ArrayBuffer): EffortField {
     edgeIds: new Uint32Array(buffer, HEADER_SIZE, count),
     times: new Float32Array(buffer, HEADER_SIZE + 4 * count, count),
     cumAscents: new Float32Array(buffer, HEADER_SIZE + 8 * count, count),
+    grid,
   };
 }

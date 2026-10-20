@@ -14,6 +14,13 @@ node_modules/
 dist/
 .wrangler/
 
+# Local env overrides (production values live in frontend/.env.production)
+.env.local
+.env.*.local
+
+# Build venv created by build/run_build.sh
+build/venv/
+
 # Editors / OS
 .DS_Store
 *.swp

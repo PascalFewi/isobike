@@ -1,5 +1,5 @@
 /**
- * Profil / Fitness math -- especially the invariant that makes Fitness free:
+ * Profil / flat-speed math -- especially the invariant that makes the speed slider free:
  * scaling both speeds by the same factor rescales every time uniformly and does
  * NOT change route choice.
  */
@@ -7,11 +7,13 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  FLAT_KMH_DEFAULT,
   PROFILE_ANCHORS,
-  applyFitness,
-  fitnessToFactor,
+  displayTime,
   fromKmh,
   profileToSpeeds,
+  riderVamHmh,
+  speedFactor,
 } from '../src/lib/profile.ts';
 
 describe('profileToSpeeds', () => {
@@ -49,27 +51,33 @@ describe('profileToSpeeds', () => {
   });
 });
 
-describe('fitness is a pure time rescale, not a re-route', () => {
-  it('maps the slider onto 0.7x..1.3x', () => {
-    expect(fitnessToFactor(0)).toBeCloseTo(0.7, 9);
-    expect(fitnessToFactor(0.5)).toBeCloseTo(1.0, 9);
-    expect(fitnessToFactor(1)).toBeCloseTo(1.3, 9);
+describe('flat speed is a pure time rescale, not a re-route', () => {
+  it('is 1 at the profile speed and scales linearly', () => {
+    const mixed = profileToSpeeds(0.5); // 27 km/h
+    expect(speedFactor(27, mixed)).toBeCloseTo(1, 9);
+    expect(speedFactor(25, mixed)).toBeCloseTo(25 / 27, 9);
   });
 
-  it('a fitter rider sees smaller times (t / factor)', () => {
-    expect(applyFitness(3600, 1.3)).toBeCloseTo(3600 / 1.3, 6);
-    expect(applyFitness(3600, 0.7)).toBeCloseTo(3600 / 0.7, 6);
-    expect(applyFitness(3600, 1.0)).toBe(3600);
+  it('keeps the profile ratio: VAM scales with the flat speed', () => {
+    const mixed = profileToSpeeds(0.5);
+    expect(riderVamHmh(27, mixed)).toBeCloseTo(700, 6);
+    expect(riderVamHmh(25, mixed)).toBeCloseTo((700 * 25) / 27, 6);
+  });
+
+  it('divides times by the factor', () => {
+    expect(displayTime(3600, 1.25)).toBeCloseTo(2880, 6);
+    expect(displayTime(3600, 1)).toBe(3600);
   });
 
   it('preserves the ORDER of edge times -- so the route/isochrone shape is unchanged', () => {
-    // The property that lets Fitness be applied client-side with no re-route:
-    // dividing every time by a positive factor is monotonic.
     const times = [120, 3600, 60, 7200, 1800];
-    const factor = 1.15;
-    const rescaled = times.map((t) => applyFitness(t, factor));
+    const rescaled = times.map((t) => displayTime(t, 0.9));
     const orderBefore = [...times.keys()].sort((a, b) => times[a] - times[b]);
     const orderAfter = [...rescaled.keys()].sort((a, b) => rescaled[a] - rescaled[b]);
     expect(orderAfter).toEqual(orderBefore);
+  });
+
+  it('defaults to 25 km/h', () => {
+    expect(FLAT_KMH_DEFAULT).toBe(25);
   });
 });

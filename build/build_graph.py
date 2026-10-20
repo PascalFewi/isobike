@@ -147,8 +147,10 @@ def run_pipeline(
         # loaded at all (nationwide, raw + measured together strain a 24 GB box).
         return measure_network(load_collapse_prune(), sampler)
 
+    # v3: MeasuredEdge.profile. An older pickle loads with profile=None and would
+    # silently ship straight-line elevations in geometry.bin.
     measured = _cached_stage(
-        region_cache / f"measured-{dem}-v2.pkl", force, measure, f"dem sample ({dem})"
+        region_cache / f"measured-{dem}-v3.pkl", force, measure, f"dem sample ({dem})"
     )
     assert isinstance(measured, MeasuredNetwork)
 

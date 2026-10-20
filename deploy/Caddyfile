@@ -1,0 +1,49 @@
+# Caddy in front of isobike: static frontend, public map data, and the routing
+# API. Installed to /etc/caddy/Caddyfile by deploy/setup-server.sh.
+#
+# Phase 1 (now): plain HTTP on the server's IP -- the ":80" site below.
+# Phase 2 (domain): replace ":80" with the domain, e.g. "isobike.ch, www.isobike.ch",
+# point the DNS A record at the server, and `sudo systemctl reload caddy`. Caddy
+# then gets and renews a Let's Encrypt certificate on its own and redirects
+# HTTP to HTTPS.
+
+{
+	# Contact for Let's Encrypt expiry notices (phase 2).
+	# email you@example.com
+}
+
+:80 {
+	# Routing API -> Node on localhost. /api is stripped: /api/route -> /route.
+	handle_path /api/* {
+		encode zstd gzip
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	# Only the files the browser needs are public; graph.bin and geometry.bin
+	# stay private to the API (they are 100-200 MB each).
+	@public_data path /data/network.pmtiles /data/meta.json
+	handle @public_data {
+		uri strip_prefix /data
+		root * /opt/isobike/data
+		# PMTiles is read with range requests; its tiles are already compressed.
+		header Cache-Control "public, max-age=3600"
+		file_server
+	}
+	handle /data/* {
+		respond 404
+	}
+
+	# The single-page frontend of the active release.
+	handle {
+		root * /opt/isobike/current/frontend
+		encode zstd gzip
+		@assets path /assets/*
+		header @assets Cache-Control "public, max-age=31536000, immutable"
+		try_files {path} /index.html
+		file_server
+	}
+
+	log {
+		output file /var/log/caddy/isobike.log
+	}
+}

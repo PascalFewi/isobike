@@ -28,3 +28,5 @@ preview_bucket_name = "velorouter-graph-dev"
 # Object key within the bucket. Europe sharding later can point this per-Worker
 # at "ch/graph.bin", "at/graph.bin", ... without a code change.
 GRAPH_KEY = "graph.bin"
+# Route geometry + elevations, read by byte range only (never loaded whole).
+GEOMETRY_KEY = "geometry.bin"

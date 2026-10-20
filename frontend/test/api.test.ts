@@ -1,6 +1,6 @@
 /**
  * API client request-building, with fetch mocked. The key assertions: profile
- * speeds and filters go on the wire; the Fitness factor never does.
+ * speeds and filters go on the wire; the rider's flat speed never does.
  */
 
 import { readFileSync } from 'node:fs';
@@ -35,13 +35,13 @@ function mockFetch(response: () => Response): Captured {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('effortField request', () => {
-  it('sends profile speeds and the budget, never a fitness factor', async () => {
+  it('sends profile speeds, the budget and the grid size, never a speed factor', async () => {
     const cap = mockFetch(() => new Response(SAMPLE_AB, { status: 200 }));
     const field = await effortField({ lat: 46.5, lon: 8.03 }, MIXED, {}, 28800);
 
     expect(cap.url).toContain('/effort-field');
     expect(cap.body).toMatchObject({
-      lat: 46.5, lon: 8.03, v_flat: MIXED.vFlatMps, vam: MIXED.vamMps, max_cost: 28800,
+      lat: 46.5, lon: 8.03, v_flat: MIXED.vFlatMps, vam: MIXED.vamMps, max_cost: 28800, grid_km: 1,
     });
     expect(cap.body).not.toHaveProperty('fitness');
     expect(cap.body).not.toHaveProperty('alpha');

@@ -1,14 +1,23 @@
 /**
- * MapLibre style + data-driven expressions for the effort field and the route.
+ * MapLibre style + data-driven expressions for the reach map and the route.
  *
- * The effort colouring is a join: the Worker's `(edge_id -> time, cum_ascent)`
- * field is pushed onto the PMTiles line features via `setFeatureState` (the
- * source uses `promoteId` so `edge_id` becomes the feature id), and the paint
- * expressions read `feature-state`.
+ * The display changes with zoom, because what reads well changes with scale:
  *
- * Fitness and the budget change only these *expressions* (a cheap
- * `setPaintProperty`), never the feature-state and never a Worker call -- the raw
- * Worker time stays in feature-state and the band thresholds are scaled instead.
+ *   zoom <= 10   isolines at the band edges over a soft area fill, both drawn
+ *                from the Worker's 1 km min-time grid (see isolines.ts) -- at
+ *                country scale a road line is pixel noise
+ *   zoom 10-13   halo + line: a wide translucent band-coloured halo merges
+ *                valleys and plains into areas, a fine line on top shows which
+ *                road actually gets you there
+ *   zoom >= 13   lines by road class: main roads bold, tracks and paths fine,
+ *                with a light casing -- here the single road matters
+ *
+ * The road layers are a join: the Worker's `(edge_id -> time)` field is pushed
+ * onto the PMTiles line features via `setFeatureState` (the source uses
+ * `promoteId` so `edge_id` becomes the feature id), and the paint expressions
+ * read `feature-state.time`. That time is in *Worker* seconds including the
+ * route-leg offset; the rider's speed factor and the budget only change these
+ * expressions (a cheap `setPaintProperty`), never the state, never a Worker call.
  */
 
 import type {
@@ -17,141 +26,164 @@ import type {
   StyleSpecification,
 } from 'maplibre-gl';
 
-import { BAND_BOUNDS_S, PALETTE } from './colorScale.ts';
+import { BAND_COLORS, N_BANDS, bandStepS } from './colorScale.ts';
 import { widthStops } from './mapWidth.ts';
-import { DEFAULT_BUDGET_S, PMTILES_URL, REFERENCE_LAT, TILE_LAYER } from '../config.ts';
+import { PMTILES_URL, REFERENCE_LAT, TILE_LAYER } from '../config.ts';
 
 export const EFFORT_SOURCE = 'network';
-export const EFFORT_LAYER = 'effort';
-export const ASCENT_LAYER = 'effort-ascent';
-export const ROUTE_LAYER = 'route';
+export const ISO_FILL_SOURCE = 'iso-fill';
+export const ISO_LINE_SOURCE = 'iso-lines';
+export const ROUTE_SOURCE = 'route';
+export const HOVER_SOURCE = 'hover';
+
+export const ISO_FILL_LAYER = 'iso-fill';
+export const ISO_LINE_LAYER = 'iso-lines';
+export const HALO_LAYER = 'effort-halo';
+export const CASING_LAYER = 'effort-casing';
+export const LINE_LAYER = 'effort-line';
+export const ROUTE_CASING_LAYER = 'route-casing';
+export const ROUTE_LAYER = 'route-line';
+export const HOVER_LAYER = 'hover-point';
+
+/** Zoom where the isolines hand over to the road lines (cross-fade +-0.5). */
+export const ISO_MAX_ZOOM = 10.5;
+/** Zoom where the halo fades out and the class lines take over. */
+export const CLASS_ZOOM = 13;
+/** Below this zoom the road layers are invisible, so no feature-state is needed. */
+export const STAMP_MIN_ZOOM = 9;
 
 const TRANSPARENT = 'rgba(0,0,0,0)';
 
+/** Road class from the tile's `highway` property: 0 main, 1 local, 2 track/path/cycleway. */
+const ROAD_CLASS: ExpressionSpecification = [
+  'match',
+  ['get', 'highway'],
+  ['primary', 'primary_link', 'secondary', 'secondary_link', 'tertiary', 'tertiary_link'],
+  0,
+  ['unclassified', 'residential', 'living_street', 'service', 'road'],
+  1,
+  2,
+];
+
+const HAS_TIME = ['!=', ['feature-state', 'time'], null] as unknown as ExpressionSpecification;
+
+/** In budget: set and below the budget in Worker seconds. */
+function inBudget(budgetHours: number, factor: number): ExpressionSpecification {
+  return ['all', HAS_TIME, ['<', ['feature-state', 'time'], budgetHours * 3600 * factor]];
+}
+
 /**
- * `line-color` for the effort layer: a step over `feature-state.time`, with the
- * band thresholds scaled by the Fitness factor (fitter -> same colour reached at
- * a larger raw time). Edges with no field entry render transparent.
+ * `line-color` for the road layers: a step over `feature-state.time`. Band edges
+ * are displayed seconds times the speed factor, i.e. compared in Worker seconds
+ * (displayed = worker / factor).
  */
-export function effortColorExpression(fitnessFactor: number): ExpressionSpecification {
-  const step: unknown[] = ['step', ['feature-state', 'time'], PALETTE[0]];
-  for (let i = 0; i < BAND_BOUNDS_S.length; i++) {
-    step.push(BAND_BOUNDS_S[i] * fitnessFactor, PALETTE[i + 1]);
-  }
+export function effortColorExpression(budgetHours: number, factor: number): ExpressionSpecification {
+  const step: unknown[] = ['step', ['feature-state', 'time'], BAND_COLORS[0]];
+  const width = bandStepS(budgetHours) * factor;
+  for (let k = 1; k < N_BANDS; k++) step.push(k * width, BAND_COLORS[k]);
+  return ['case', HAS_TIME, step, TRANSPARENT] as unknown as ExpressionSpecification;
+}
+
+/** Halo opacity: fades in above the isolines, out as the class lines take over. */
+export function haloOpacityExpression(budgetHours: number, factor: number): ExpressionSpecification {
+  const on: ExpressionSpecification = ['case', inBudget(budgetHours, factor), 1, 0];
   return [
-    'case',
-    ['==', ['feature-state', 'time'], null],
-    TRANSPARENT,
-    step as unknown as ExpressionSpecification,
+    'interpolate', ['linear'], ['zoom'],
+    ISO_MAX_ZOOM - 1, 0,
+    ISO_MAX_ZOOM, ['*', 0.3, on],
+    CLASS_ZOOM - 0.5, ['*', 0.22, on],
+    CLASS_ZOOM + 0.5, 0,
   ] as unknown as ExpressionSpecification;
 }
 
-/** `line-width`: a fixed 200 m on the ground, zoom-interpolated, floored at 2 px. */
-export function effortWidthExpression(meters = 200): ExpressionSpecification {
-  const stops = widthStops(meters, REFERENCE_LAT);
+export function lineOpacityExpression(budgetHours: number, factor: number): ExpressionSpecification {
+  const on: ExpressionSpecification = ['case', inBudget(budgetHours, factor), 1, 0];
+  return [
+    'interpolate', ['linear'], ['zoom'],
+    ISO_MAX_ZOOM - 1, 0,
+    ISO_MAX_ZOOM, ['*', 0.95, on],
+  ] as unknown as ExpressionSpecification;
+}
+
+export function casingOpacityExpression(budgetHours: number, factor: number): ExpressionSpecification {
+  const on: ExpressionSpecification = ['case', inBudget(budgetHours, factor), 1, 0];
+  return [
+    'interpolate', ['linear'], ['zoom'],
+    CLASS_ZOOM - 0.5, 0,
+    CLASS_ZOOM + 0.5, ['*', 0.85, on],
+  ] as unknown as ExpressionSpecification;
+}
+
+/** `line-width` by road class: a fine line mid-zoom, a road-map hierarchy close in. */
+function classWidth(extra = 0): ExpressionSpecification {
+  const byClass = (main: number, local: number, track: number): ExpressionSpecification =>
+    ['match', ROAD_CLASS, 0, main + extra, 1, local + extra, track + extra] as unknown as ExpressionSpecification;
+  return [
+    'interpolate', ['exponential', 1.6], ['zoom'],
+    10, byClass(1.6, 1.1, 0.8),
+    13, byClass(3.2, 2.2, 1.3),
+    16, byClass(9, 6, 3),
+  ] as unknown as ExpressionSpecification;
+}
+
+/** `line-width` for a fixed real width on the ground, floored at 2 px. */
+export function realWidthExpression(meters: number): ExpressionSpecification {
   const expr: unknown[] = ['interpolate', ['exponential', 2], ['zoom']];
-  for (const [z, px] of stops) expr.push(z, px);
+  for (const [z, px] of widthStops(meters, REFERENCE_LAT)) expr.push(z, px);
   return expr as unknown as ExpressionSpecification;
 }
 
-/**
- * `line-opacity` for the effort layer: hide edges with no field entry, and hide
- * edges whose *displayed* reach time exceeds the client-side budget. Both budget
- * and Fitness change only this expression -- no Worker call. `budgetDisplayS` is
- * the budget in displayed seconds; the raw feature-state time is compared against
- * `budgetDisplayS * fitnessFactor` (displayed = raw / fitness).
- */
-export function effortOpacityExpression(
-  budgetDisplayS: number,
-  fitnessFactor: number,
-  base = 0.85,
-): ExpressionSpecification {
+function roadLayer(id: string, paint: LineLayerSpecification['paint'], minzoom: number): LineLayerSpecification {
+  return {
+    id,
+    type: 'line',
+    source: EFFORT_SOURCE,
+    'source-layer': TILE_LAYER,
+    minzoom,
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: paint ?? {},
+  };
+}
+
+/** The road layers in draw order (halo, casing, line), styled for a budget and speed. */
+export function roadLayers(budgetHours: number, factor: number): LineLayerSpecification[] {
   return [
-    'case',
-    ['==', ['feature-state', 'time'], null],
-    0,
-    ['>', ['feature-state', 'time'], budgetDisplayS * fitnessFactor],
-    0,
-    base,
-  ] as unknown as ExpressionSpecification;
+    roadLayer(HALO_LAYER, {
+      'line-color': effortColorExpression(budgetHours, factor),
+      'line-width': realWidthExpression(420),
+      'line-opacity': haloOpacityExpression(budgetHours, factor),
+    }, ISO_MAX_ZOOM - 1),
+    roadLayer(CASING_LAYER, {
+      'line-color': '#ffffff',
+      'line-width': classWidth(2),
+      'line-opacity': casingOpacityExpression(budgetHours, factor),
+    }, CLASS_ZOOM - 0.5),
+    roadLayer(LINE_LAYER, {
+      'line-color': effortColorExpression(budgetHours, factor),
+      'line-width': classWidth(),
+      'line-opacity': lineOpacityExpression(budgetHours, factor),
+    }, ISO_MAX_ZOOM - 1),
+  ];
 }
 
-/** Second channel: a dark overlay whose opacity grows with cumulative ascent. */
-export function ascentOpacityExpression(maxCumAscent: number): ExpressionSpecification {
-  const denom = maxCumAscent > 0 ? maxCumAscent : 1;
-  return [
-    'case',
-    ['==', ['feature-state', 'cumAscent'], null],
-    0,
-    ['min', 0.55, ['/', ['feature-state', 'cumAscent'], denom]],
-  ] as unknown as ExpressionSpecification;
-}
-
-export function effortLayer(fitnessFactor: number): LineLayerSpecification {
-  return {
-    id: EFFORT_LAYER,
-    type: 'line',
-    source: EFFORT_SOURCE,
-    'source-layer': TILE_LAYER,
-    layout: { 'line-cap': 'round', 'line-join': 'round' },
-    paint: {
-      'line-color': effortColorExpression(fitnessFactor),
-      'line-width': effortWidthExpression(),
-      'line-opacity': effortOpacityExpression(DEFAULT_BUDGET_S, fitnessFactor),
-    },
-  };
-}
-
-export function ascentLayer(maxCumAscent: number): LineLayerSpecification {
-  return {
-    id: ASCENT_LAYER,
-    type: 'line',
-    source: EFFORT_SOURCE,
-    'source-layer': TILE_LAYER,
-    layout: { 'line-cap': 'round', 'line-join': 'round' },
-    paint: {
-      'line-color': '#1a1a1a',
-      'line-width': effortWidthExpression(70), // thinner than the effort corridor
-      'line-opacity': ascentOpacityExpression(maxCumAscent),
-    },
-  };
-}
-
-/**
- * The route reuses the PMTiles geometry: `/route` returns `edge_id`s, so we set
- * `feature-state.onRoute` for those edges and colour them, rather than shipping
- * geometry back from the Worker. MapLibre filters cannot read feature-state, so
- * the layer draws every edge but paints only the route ones (rest transparent).
- */
-export function routeLayer(): LineLayerSpecification {
-  return {
-    id: ROUTE_LAYER,
-    type: 'line',
-    source: EFFORT_SOURCE,
-    'source-layer': TILE_LAYER,
-    layout: { 'line-cap': 'round', 'line-join': 'round' },
-    paint: {
-      'line-color': [
-        'case',
-        ['==', ['feature-state', 'onRoute'], true],
-        '#e6194b',
-        TRANSPARENT,
-      ] as unknown as ExpressionSpecification,
-      'line-width': 4,
-      'line-opacity': 0.95,
-    },
-  };
+/** Restyle the road layers in place for a new budget / speed -- no state change. */
+export function restyleRoads(
+  map: { setPaintProperty(layer: string, prop: string, value: unknown): void },
+  budgetHours: number,
+  factor: number,
+): void {
+  const color = effortColorExpression(budgetHours, factor);
+  map.setPaintProperty(HALO_LAYER, 'line-color', color);
+  map.setPaintProperty(HALO_LAYER, 'line-opacity', haloOpacityExpression(budgetHours, factor));
+  map.setPaintProperty(CASING_LAYER, 'line-opacity', casingOpacityExpression(budgetHours, factor));
+  map.setPaintProperty(LINE_LAYER, 'line-color', color);
+  map.setPaintProperty(LINE_LAYER, 'line-opacity', lineOpacityExpression(budgetHours, factor));
 }
 
 /**
  * swisstopo grey national map (`ch.swisstopo.pixelkarte-grau`): greyscale, so the
- * viridis effort colours dominate, but with the Swiss relief hillshade + contours
- * + topographic detail for real orientation -- the middle ground between a busy
- * colour map and a flat grey one. Free, no key; CH coverage (all v1 needs).
- *
- * Alternatives (swap `BASEMAP_TILES`/attribution):
- *   flat minimal (global) : https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png  (+ b,c,d)
- *   full-colour terrain   : https://a.tile.opentopomap.org/{z}/{x}/{y}.png            (+ b,c)
+ * reach colours dominate, but with relief, contours and topographic detail for
+ * orientation. Free, no key; CH coverage (all v1 needs).
  */
 const BASEMAP_TILES = [
   'https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-grau/default/current/3857/{z}/{x}/{y}.jpeg',
@@ -160,11 +192,12 @@ const BASEMAP_MAXZOOM = 19;
 const BASEMAP_ATTRIBUTION =
   '© <a href="https://www.swisstopo.admin.ch" target="_blank" rel="noreferrer">swisstopo</a>';
 
-/**
- * The base style: a muted greyscale basemap for orientation, plus the PMTiles
- * network source. The effort-colouring line layers are added on top at runtime
- * (see MapView), so they overlay the basemap.
- */
+/** A 1x1 transparent PNG: the iso fill's placeholder before the first field. */
+export const EMPTY_PNG =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+const EMPTY_FC = { type: 'FeatureCollection' as const, features: [] };
+
+/** Base style: basemap, the network source, and the empty overlay sources. */
 export function buildStyle(): StyleSpecification {
   return {
     version: 8,
@@ -182,11 +215,64 @@ export function buildStyle(): StyleSpecification {
         url: `pmtiles://${PMTILES_URL}`,
         // edge_id becomes the feature id so setFeatureState can target it.
         promoteId: { [TILE_LAYER]: 'edge_id' },
+        // The network is derived from OpenStreetMap (ODbL): attribution required.
+        attribution: '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>-Mitwirkende',
       },
+      [ISO_FILL_SOURCE]: {
+        type: 'image',
+        url: EMPTY_PNG,
+        coordinates: [[5.9, 47.9], [10.6, 47.9], [10.6, 45.7], [5.9, 45.7]],
+      },
+      [ISO_LINE_SOURCE]: { type: 'geojson', data: EMPTY_FC },
+      [ROUTE_SOURCE]: { type: 'geojson', data: EMPTY_FC },
+      [HOVER_SOURCE]: { type: 'geojson', data: EMPTY_FC },
     },
     layers: [
       { id: 'bg', type: 'background', paint: { 'background-color': '#eef1f4' } },
       { id: 'basemap', type: 'raster', source: 'basemap' },
+      {
+        id: ISO_FILL_LAYER,
+        type: 'raster',
+        source: ISO_FILL_SOURCE,
+        maxzoom: ISO_MAX_ZOOM + 0.5,
+        paint: {
+          'raster-opacity': ['interpolate', ['linear'], ['zoom'], 6, 0.42, ISO_MAX_ZOOM - 0.5, 0.32, ISO_MAX_ZOOM + 0.5, 0],
+          'raster-resampling': 'linear',
+          'raster-fade-duration': 0,
+        },
+      },
+      {
+        id: ISO_LINE_LAYER,
+        type: 'line',
+        source: ISO_LINE_SOURCE,
+        maxzoom: ISO_MAX_ZOOM + 0.5,
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': ['get', 'color'],
+          'line-width': ['case', ['==', ['get', 'last'], true], 2.8, 1.6],
+          'line-opacity': ['interpolate', ['linear'], ['zoom'], ISO_MAX_ZOOM - 0.5, 0.95, ISO_MAX_ZOOM + 0.5, 0],
+        },
+      },
     ],
   };
+}
+
+/** Route on top of everything: a white casing and a dark core (outside the palette). */
+export function routeLayers(): LineLayerSpecification[] {
+  return [
+    {
+      id: ROUTE_CASING_LAYER,
+      type: 'line',
+      source: ROUTE_SOURCE,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': '#ffffff', 'line-width': ['interpolate', ['linear'], ['zoom'], 7, 5, 14, 9], 'line-opacity': 0.95 },
+    },
+    {
+      id: ROUTE_LAYER,
+      type: 'line',
+      source: ROUTE_SOURCE,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': '#11161d', 'line-width': ['interpolate', ['linear'], ['zoom'], 7, 2.5, 14, 4.5] },
+    },
+  ];
 }

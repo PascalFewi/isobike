@@ -8,13 +8,23 @@
  *
  * Handlers throw {@link ApiError} on bad input; {@link handleRequest} is the one
  * place that formats errors into responses, so a new endpoint cannot forget to.
+ *
+ * Optional data beyond the graph (route geometry from `geometry.bin`) comes in as
+ * {@link Deps}; without it the endpoints still answer, just without that part.
  */
+
+/** Optional per-isolate data sources beyond the graph. */
+export interface Deps {
+  readonly geometry?: GeometrySource;
+}
 
 import { snap } from './router.js';
 import { effortField, route } from './router.js';
 import type { Graph } from './binformat.js';
+import { routeGeometry, type GeometrySource } from './geometry.js';
 import {
   ApiError,
+  effortGrid,
   parseEffortFieldBody,
   parseRouteBody,
   parseSnapQuery,
@@ -69,7 +79,8 @@ export async function handleEffortField(graph: Graph, request: Request): Promise
     allowedSurfaces: req.allowedSurfaces,
     maxCost: req.maxCost,
   });
-  const buffer = serializeEffortField(graph, source, field);
+  const grid = req.gridKm === undefined ? null : effortGrid(graph, field, req.gridKm);
+  const buffer = serializeEffortField(graph, source, field, grid);
   return new Response(buffer, {
     status: 200,
     headers: {
@@ -84,7 +95,7 @@ export async function handleEffortField(graph: Graph, request: Request): Promise
 }
 
 /** `POST /route` -> JSON route with summed stats, or `{found:false}`. */
-export async function handleRoute(graph: Graph, request: Request): Promise<Response> {
+export async function handleRoute(graph: Graph, request: Request, deps: Deps = {}): Promise<Response> {
   const req = parseRouteBody(await readJsonBody(request));
   const from = snap(graph, req.from[0], req.from[1]);
   const to = snap(graph, req.to[0], req.to[1]);
@@ -98,9 +109,23 @@ export async function handleRoute(graph: Graph, request: Request): Promise<Respo
     // A real answer, not an error: the two ends do not connect under this filter.
     return jsonResponse({ ...base, found: false });
   }
+  // Full polyline with elevations, when geometry.bin is available. A failure here
+  // degrades to a route without geometry rather than failing the whole request.
+  let geometry: Array<[number, number, number]> | undefined;
+  let geometryError: string | undefined;
+  if (deps.geometry !== undefined) {
+    try {
+      const header = await deps.geometry.header();
+      geometry = await routeGeometry(graph, deps.geometry.reader, header, result.nodes, result.edgeIds);
+    } catch (err) {
+      geometryError = err instanceof Error ? err.message : String(err);
+    }
+  }
   return jsonResponse({
     ...base,
     found: true,
+    ...(geometry !== undefined ? { geometry } : {}),
+    ...(geometryError !== undefined ? { geometry_error: geometryError } : {}),
     cost_s: result.cost,
     dist_m: result.distM,
     ascent_m: result.ascentM,
@@ -125,7 +150,7 @@ export function handleSnap(graph: Graph, request: Request): Response {
  * Route a request to its handler and format any error. Pure over `graph`, so the
  * whole API surface is testable without R2 or a live Worker.
  */
-export async function handleRequest(graph: Graph, request: Request): Promise<Response> {
+export async function handleRequest(graph: Graph, request: Request, deps: Deps = {}): Promise<Response> {
   const url = new URL(request.url);
   const { pathname } = url;
 
@@ -140,7 +165,7 @@ export async function handleRequest(graph: Graph, request: Request): Promise<Res
     }
     if (pathname === '/route') {
       if (request.method !== 'POST') throw new ApiError('use POST', 405);
-      return await handleRoute(graph, request);
+      return await handleRoute(graph, request, deps);
     }
     if (pathname === '/snap') {
       if (request.method !== 'GET') throw new ApiError('use GET', 405);

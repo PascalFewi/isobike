@@ -1,64 +1,67 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  BAND_BOUNDS_S,
-  BAND_LABELS,
-  PALETTE,
-  ascentIntensity,
+  BAND_COLORS,
+  N_BANDS,
+  PALETTE_STOPS,
   bandIndex,
-  colorForTime,
-  timeToFlatKm,
+  bandStepS,
+  formatHours,
+  legendBands,
 } from '../src/lib/colorScale.ts';
 
-describe('time bands', () => {
-  it('has one more colour and label than boundaries (open-ended top band)', () => {
-    expect(PALETTE.length).toBe(BAND_BOUNDS_S.length + 1);
-    expect(BAND_LABELS.length).toBe(PALETTE.length);
+describe('budget-dependent band scale', () => {
+  it('uses 30 min / 1 h / 2 h bands for budgets up to 4 / 8 / 16 h', () => {
+    expect(bandStepS(0.5)).toBe(1800);
+    expect(bandStepS(4)).toBe(1800);
+    expect(bandStepS(4.5)).toBe(3600);
+    expect(bandStepS(8)).toBe(3600);
+    expect(bandStepS(8.5)).toBe(7200);
+    expect(bandStepS(16)).toBe(7200);
   });
 
-  it('assigns bands at the boundaries', () => {
-    expect(bandIndex(0)).toBe(0);
-    expect(bandIndex(29 * 60)).toBe(0);
-    expect(bandIndex(30 * 60)).toBe(1); // boundary is exclusive at the bottom
-    expect(bandIndex(90 * 60)).toBe(2);
-    expect(bandIndex(9 * 3600)).toBe(BAND_BOUNDS_S.length); // beyond 8 h
-  });
-
-  it('is monotonic in time', () => {
-    let prev = -1;
-    for (const t of [0, 1800, 3600, 7200, 14400, 28800, 40000]) {
-      const b = bandIndex(t);
-      expect(b).toBeGreaterThanOrEqual(prev);
-      prev = b;
+  it('spans the full budget with exactly eight equal bands at the scale maximum', () => {
+    for (const h of [4, 8, 16]) {
+      const bands = legendBands(h);
+      expect(bands.length).toBe(N_BANDS);
+      expect(bands[bands.length - 1].to).toBe(h + ' h');
     }
   });
 
-  it('maps a time straight to its band colour', () => {
-    expect(colorForTime(10 * 60)).toBe(PALETTE[0]);
-    expect(colorForTime(3 * 3600)).toBe(PALETTE[3]);
+  it('shows fewer bands for a shorter budget, with the same colours', () => {
+    const two = legendBands(2);
+    expect(two.map((b) => b.from + '-' + b.to)).toEqual(['0-0:30', '0:30-1 h', '1 h-1:30', '1:30-2 h']);
+    expect(two.map((b) => b.color)).toEqual(BAND_COLORS.slice(0, 4));
   });
 
-  it('uses hex colours', () => {
-    for (const c of PALETTE) expect(c).toMatch(/^#[0-9a-f]{6}$/);
-  });
-});
-
-describe('second channel: cumulative ascent', () => {
-  it('normalises to 0..1 against the field max', () => {
-    expect(ascentIntensity(0, 1000)).toBe(0);
-    expect(ascentIntensity(500, 1000)).toBe(0.5);
-    expect(ascentIntensity(1000, 1000)).toBe(1);
-  });
-
-  it('clamps and handles a degenerate max', () => {
-    expect(ascentIntensity(1500, 1000)).toBe(1);
-    expect(ascentIntensity(100, 0)).toBe(0);
+  it('assigns bands at the edges and clamps past the last', () => {
+    expect(bandIndex(0, 8)).toBe(0);
+    expect(bandIndex(3599, 8)).toBe(0);
+    expect(bandIndex(3600, 8)).toBe(1);
+    expect(bandIndex(99 * 3600, 8)).toBe(N_BANDS - 1);
   });
 });
 
-describe('flat-km toggle', () => {
-  it('converts reach time to flat-equivalent distance', () => {
-    // 1 h at 7.5 m/s = 27 km.
-    expect(timeToFlatKm(3600, 7.5)).toBeCloseTo(27, 6);
+describe('Alpenglühen palette', () => {
+  it('runs from the first to the last stop', () => {
+    expect(BAND_COLORS[0]).toBe(PALETTE_STOPS[0]);
+    expect(BAND_COLORS[N_BANDS - 1]).toBe(PALETTE_STOPS[PALETTE_STOPS.length - 1]);
+    for (const c of BAND_COLORS) expect(c).toMatch(/^#[0-9a-f]{6}$/);
+  });
+
+  it('gets darker band by band, so the order reads without hue', () => {
+    const lum = (hex: string): number => {
+      const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    for (let k = 1; k < N_BANDS; k++) expect(lum(BAND_COLORS[k])).toBeLessThan(lum(BAND_COLORS[k - 1]));
+  });
+});
+
+describe('formatHours', () => {
+  it('writes whole hours and h:mm', () => {
+    expect(formatHours(3600)).toBe('1 h');
+    expect(formatHours(5400)).toBe('1:30');
+    expect(formatHours(1800)).toBe('0:30');
   });
 });

@@ -280,3 +280,76 @@ def test_meta_reports_the_graph_shape() -> None:
     assert meta["node_count"] == 3
     assert meta["geom_edge_count"] == 2
     assert meta["bbox"] == list(graph.bbox)
+
+
+# --------------------------------------------------------------------------- #
+# Spatial edge order + geometry.bin
+# --------------------------------------------------------------------------- #
+
+from build.export import exportable_edges, hilbert_xy2d, read_geometry, write_geometry  # noqa: E402
+
+
+def test_hilbert_curve_visits_every_cell_once_moving_to_a_neighbour() -> None:
+    n = 8
+    xs, ys = np.meshgrid(np.arange(n), np.arange(n))
+    d = hilbert_xy2d(xs.ravel(), ys.ravel(), n)
+    assert sorted(d.tolist()) == list(range(n * n))
+    order = np.argsort(d)
+    px, py = xs.ravel()[order], ys.ravel()[order]
+    assert np.all(np.abs(np.diff(px)) + np.abs(np.diff(py)) == 1)
+
+
+def test_edge_ids_follow_space_not_input_order() -> None:
+    """Two far-apart clusters, interleaved in the input: after export the ids of
+    each cluster are contiguous, which is what keeps a route's R2 reads few."""
+    edges = []
+    for k in range(6):
+        base = 0 if k % 2 == 0 else 50  # alternate west / east cluster
+        edges.append(_edge(base + k, base + k + 100))
+    net = MeasuredNetwork(
+        node_lat={n: 46.5 + (n % 100) * 1e-4 for e in edges for n in (e.u, e.v)},
+        node_lon={n: 8.0 + (0.5 if (n % 100) >= 50 else 0.0) + (n % 100) * 1e-5 for e in edges for n in (e.u, e.v)},
+        node_elev={n: 600.0 for e in edges for n in (e.u, e.v)},
+        edges=[dataclasses.replace(e, geometry=[(46.5 + (e.u % 100) * 1e-4, 8.0 + (0.5 if e.u % 100 >= 50 else 0.0) + (e.u % 100) * 1e-5),
+                                                 (46.5 + (e.v % 100) * 1e-4, 8.0 + (0.5 if e.v % 100 >= 50 else 0.0) + (e.v % 100) * 1e-5)])
+               for e in edges],
+    )
+    order = exportable_edges(net)
+    east = [e.geometry[0][1] > 8.25 for e in order]
+    assert east in ([False] * 3 + [True] * 3, [True] * 3 + [False] * 3)
+
+
+def test_geometry_bin_round_trips_in_edge_id_order(tmp_path) -> None:
+    net = _net([_edge(0, 1), _edge(1, 2), _edge(2, 3, geometry=[_coord(2), (46.50005, 8.0001), _coord(3)])])
+    path = tmp_path / "geometry.bin"
+    n_vert = write_geometry(net, path)
+    off, vert = read_geometry(path)
+    graph = build_graph_binary(net, region_id="test")
+    assert len(off) == graph.geom_edge_count + 1 and off[-1] == n_vert == 7
+    for eid, e in enumerate(exportable_edges(net)):
+        pts = vert[off[eid]:off[eid + 1]]
+        assert pts.shape == (len(e.geometry), 3)
+        # Endpoints are the f32 node coordinates graph.bin stores -> orientable.
+        assert (pts[0, 0], pts[0, 1]) == (np.float32(net.node_lat[e.u]), np.float32(net.node_lon[e.u]))
+        assert (pts[-1, 0], pts[-1, 1]) == (np.float32(net.node_lat[e.v]), np.float32(net.node_lon[e.v]))
+        # No measured profile: elevation interpolates between the node elevations.
+        assert pts[0, 2] == pytest.approx(net.node_elev[e.u]) and pts[-1, 2] == pytest.approx(net.node_elev[e.v])
+
+
+def test_measured_profiles_keep_vertices_and_regular_points() -> None:
+    from build.dem import PROFILE_KEEP_M, measure_network
+    from build.osm_load import RawEdge, RawNetwork
+
+    net = RawNetwork()
+    a, b, c = (46.5, 8.0), (46.5, 8.004), (46.503, 8.004)  # ~300 m east, ~330 m north
+    for nid, p in ((0, a), (1, c)):
+        net.add_node(nid, *p)
+    net.edges.append(RawEdge(u=0, v=1, way_id=1, highway="residential", surface=bf.Surface.PAVED,
+                             forward=True, backward=True, geometry=[a, b, c]))
+    m = measure_network(net, lambda lat, lon: 600.0 + (lat - 46.5) * 1e4)
+    prof = m.edges[0].profile
+    assert prof is not None and prof.dtype == np.float32
+    assert any(abs(p[0] - np.float32(b[0])) < 1e-6 and abs(p[1] - np.float32(b[1])) < 1e-6 for p in prof)  # bend kept
+    seg = np.hypot(np.diff(prof[:, 0]) * 110540, np.diff(prof[:, 1]) * 76000)
+    assert seg.max() <= PROFILE_KEEP_M + 1.0
+    assert prof[-1, 2] == pytest.approx(600.0 + 0.003 * 1e4, abs=0.05)  # f32 lat: ~1.6 cm here

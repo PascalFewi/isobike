@@ -4,13 +4,23 @@
  * Worker API and the tiles are public, read-only.
  */
 
-/** Worker API base, e.g. https://velorouter-worker.<subdomain>.workers.dev */
-export const WORKER_URL: string =
-  import.meta.env.VITE_WORKER_URL ?? 'http://localhost:8787';
+/**
+ * A path like `/api` means "on the same host as the page" -- the self-hosted
+ * deployment serves frontend, API and tiles from one origin, so the build works
+ * unchanged on the bare IP now and on the domain later. Absolute URLs (local
+ * dev, a separate Worker) pass through.
+ */
+function resolve(url: string): string {
+  return url.startsWith('/') && typeof window !== 'undefined' ? `${window.location.origin}${url}` : url;
+}
 
-/** PMTiles archive on R2/CDN, e.g. https://<r2-public>/network.pmtiles */
-export const PMTILES_URL: string =
-  import.meta.env.VITE_PMTILES_URL ?? 'http://localhost:8787/network.pmtiles';
+/** Routing API base: `/api` in production, http://localhost:8787 in dev. */
+export const WORKER_URL: string = resolve(import.meta.env.VITE_WORKER_URL ?? 'http://localhost:8787');
+
+/** PMTiles archive: `/data/network.pmtiles` in production. */
+export const PMTILES_URL: string = resolve(
+  import.meta.env.VITE_PMTILES_URL ?? 'http://localhost:8788/network.pmtiles',
+);
 
 /** The PMTiles source layer name tippecanoe was told to write (`-l network`). */
 export const TILE_LAYER = 'network';

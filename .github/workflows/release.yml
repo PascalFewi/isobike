@@ -1,0 +1,116 @@
+# Deploy to the Hetzner server when a release is published from the default
+# branch (master today; renaming it to main later needs no change here).
+#
+#   1. test    -- Python pipeline, Worker/router, frontend (the same suites as locally)
+#   2. deploy  -- only for a non-prerelease whose tag is on the default branch: build the frontend
+#                 and the API server, copy them over SSH, activate on the server
+#
+# Secrets live in the `production` environment (Settings -> Environments), never
+# in the repo; see README "Deployment". Jobs from forks and pull requests never
+# see them: this workflow only runs on `release` (maintainers) and manual dispatch.
+
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to (re)deploy
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Python tests
+        run: |
+          pip install -r build/requirements.txt
+          python -m pytest -q
+      - name: Worker tests
+        working-directory: worker
+        run: |
+          npm ci
+          npx tsc --noEmit
+          npx vitest run
+      - name: Frontend tests
+        working-directory: frontend
+        run: |
+          npm ci
+          npx tsc --noEmit
+          npx vitest run
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-24.04
+    environment: production
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+      - name: Tag must be on the default branch
+        env:
+          BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git fetch origin "$BRANCH"
+          git merge-base --is-ancestor "$(git rev-parse HEAD)" "origin/$BRANCH" \
+            || { echo "::error::$TAG is not on $BRANCH -- not deploying"; exit 1; }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build   # uses .env.production: same-origin /api and /data
+      - name: Build API server
+        working-directory: server
+        run: |
+          npm ci
+          npm run build
+      - name: Package
+        run: |
+          mkdir -p pkg/frontend pkg/server
+          cp -r frontend/dist/. pkg/frontend/
+          cp -r server/dist pkg/server/dist
+          cp server/package.json pkg/server/
+          echo "$TAG" > pkg/VERSION
+          tar -czf "isobike-$TAG.tar.gz" -C pkg .
+      - name: Upload and activate
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          SSH="ssh -i $HOME/.ssh/deploy_key -o StrictHostKeyChecking=yes"
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "isobike-$TAG.tar.gz" "$USER@$HOST:/tmp/"
+          $SSH "$USER@$HOST" "bash /opt/isobike/bin/activate.sh '$TAG' '/tmp/isobike-$TAG.tar.gz'"
+      - name: Clean up key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

@@ -232,6 +232,16 @@ class MeasuredEdge:
     descent_m: float
     max_slope_pct_fwd: float
     max_slope_pct_rev: float
+    #: ``(n, 3)`` float32 ``(lat, lon, elevation)`` from ``u`` to ``v``: every
+    #: geometry vertex plus a profile point every :data:`PROFILE_KEEP_M`, for the
+    #: route line, GPX export and elevation chart (``geometry.bin``). ``None`` on
+    #: hand-built edges; export then interpolates between the node elevations.
+    profile: np.ndarray | None = None
+
+
+#: Spacing of the profile points kept per edge beyond its vertices, in metres. A
+#: straight 2-vertex road over a hump still shows the hump at this spacing.
+PROFILE_KEEP_M: Final = 50.0
 
 
 @dataclass
@@ -288,6 +298,7 @@ class _Profiles:
     head: np.ndarray
     last: np.ndarray
     dist: np.ndarray  # per edge: summed segment length, the stored ``dist``
+    is_vertex: np.ndarray  # per point: an original geometry vertex (not inserted)
 
 
 def _resample_all(
@@ -338,7 +349,8 @@ def _resample_all(
     edge_of_point = np.repeat(np.arange(n_edges), per_edge)
     cum = total - total[head][edge_of_point]
     dist = _per_edge(np.add, seg_len, np.diff(start) - 1)
-    return _Profiles(out_lat, out_lon, cum, head, last, dist)
+    is_vertex = (sub_k == 0) | (sub_k == n_sub_v[vert])
+    return _Profiles(out_lat, out_lon, cum, head, last, dist, is_vertex)
 
 
 def _per_edge(ufunc: np.ufunc, values: np.ndarray, counts: np.ndarray) -> np.ndarray:
@@ -488,12 +500,22 @@ def measure_network(net: RawNetwork, sampler: Sampler) -> MeasuredNetwork:
     rev_cum = prof.cum[owner_last] - prof.cum[mirror]
     slope_rev = _rolling_max_uphill_all(rev_cum, z[mirror], prof.head, prof.last)
 
+    # Kept profile: every vertex, plus every k-th point (~PROFILE_KEEP_M apart).
+    rank = pos - owner_head
+    every = max(1, int(round(PROFILE_KEEP_M / SAMPLE_STEP_M)))
+    keep_pt = prof.is_vertex | (rank % every == 0)
+    keep_pt[prof.last] = True
+    kept = np.stack([prof.lat, prof.lon, z], axis=1)[keep_pt].astype(np.float32)
+    kept_per_edge = _per_edge(np.add, keep_pt.astype(np.float64), per_edge).astype(np.int64)
+    profiles = np.split(kept, np.cumsum(kept_per_edge)[:-1])
+
     edges = [
         MeasuredEdge(
             u=e.u, v=e.v, way_id=e.way_id, highway=e.highway, surface=e.surface,
             forward=e.forward, backward=e.backward, geometry=g,
             dist_m=float(prof.dist[i]), ascent_m=float(ascent[i]), descent_m=float(descent[i]),
             max_slope_pct_fwd=float(slope_fwd[i]), max_slope_pct_rev=float(slope_rev[i]),
+            profile=profiles[i].copy(),  # own the memory: a view would pickle the whole base
         )
         for i, (e, g) in enumerate(zip(net.edges, geoms))
     ]
@@ -547,23 +569,40 @@ def _sample_tile(array: np.ndarray, inv: object, x: np.ndarray, y: np.ndarray) -
     return bilinear_sample(array, row, col)
 
 
+#: Attempts per tile before a download failure aborts the build. A national run
+#: fetches ~30 k tiles; one slow response must not throw away an hour of work.
+_DOWNLOAD_ATTEMPTS: Final = 6
+
+
 def _download(url: str, path: Path) -> bool:
-    """Download ``url`` to ``path`` atomically. False on 404 (no such tile)."""
+    """Download ``url`` to ``path`` atomically. False on 404 (no such tile).
+
+    Timeouts, connection errors and 5xx/429 responses are retried with
+    exponential backoff (2, 4, 8, ... s); only a persistent failure raises.
+    """
+    import time
+
     import requests
 
-    try:
-        with requests.get(url, stream=True, timeout=120) as resp:
-            if resp.status_code == 404:  # ocean tiles simply do not exist
-                return False
-            resp.raise_for_status()
-            tmp = path.with_suffix(path.suffix + ".part")
-            with tmp.open("wb") as fh:
-                for chunk in resp.iter_content(chunk_size=1 << 20):
-                    fh.write(chunk)
-            tmp.replace(path)  # atomic: a killed download never leaves a half tile
-    except requests.RequestException as exc:  # pragma: no cover - network
-        raise RuntimeError(f"failed to download DEM tile {url}: {exc}") from exc
-    return True
+    for attempt in range(_DOWNLOAD_ATTEMPTS):
+        try:
+            with requests.get(url, stream=True, timeout=120) as resp:
+                if resp.status_code == 404:  # ocean tiles simply do not exist
+                    return False
+                resp.raise_for_status()
+                tmp = path.with_suffix(path.suffix + ".part")
+                with tmp.open("wb") as fh:
+                    for chunk in resp.iter_content(chunk_size=1 << 20):
+                        fh.write(chunk)
+                tmp.replace(path)  # atomic: a killed download never leaves a half tile
+            return True
+        except requests.RequestException as exc:  # pragma: no cover - network
+            status = exc.response.status_code if exc.response is not None else None
+            retryable = status is None or status == 429 or status >= 500
+            if not retryable or attempt == _DOWNLOAD_ATTEMPTS - 1:
+                raise RuntimeError(f"failed to download DEM tile {url}: {exc}") from exc
+            time.sleep(2.0 ** (attempt + 1))
+    return True  # unreachable; keeps type checkers happy
 
 
 #: Copernicus GLO-30 open data on AWS (public, no auth). 1 deg x 1 deg COG tiles,
@@ -632,8 +671,9 @@ STAC_SEARCH_URL: Final = "https://data.geo.admin.ch/api/stac/v0.9/search"
 SWISSALTI3D_COLLECTION: Final = "ch.swisstopo.swissalti3d"
 #: Asset suffix of the 2 m cloud-optimised GeoTIFF (LV95 / EPSG:2056).
 _ALTI_2M_SUFFIX: Final = "_2_2056_5728.tif"
-#: Parallel tile downloads. swisstopo serves from a CDN; this is polite and fast.
-_ALTI_WORKERS: Final = 16
+#: Parallel tile downloads. 16 drew read timeouts from data.geo.admin.ch late in
+#: a national run; 8 stays polite with little loss of throughput.
+_ALTI_WORKERS: Final = 8
 
 
 def _alti_tile_key(item_id: str) -> tuple[int, str]:

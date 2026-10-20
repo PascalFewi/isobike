@@ -11,6 +11,7 @@
  * and `any`-free. It declares exactly the two methods this file calls.
  */
 
+import { createGeometrySource, type GeometrySource } from './geometry.js';
 import { createGraphStore, type GraphStore } from './graphStore.js';
 import { handleRequest } from './handlers.js';
 
@@ -19,7 +20,7 @@ export interface R2ObjectBody {
   arrayBuffer(): Promise<ArrayBuffer>;
 }
 export interface R2Bucket {
-  get(key: string): Promise<R2ObjectBody | null>;
+  get(key: string, options?: { range?: { offset: number; length: number } }): Promise<R2ObjectBody | null>;
 }
 
 export interface Env {
@@ -27,6 +28,9 @@ export interface Env {
   GRAPH_BUCKET: R2Bucket;
   /** Object key; defaults to `graph.bin`. */
   GRAPH_KEY?: string;
+  /** Route geometry object key; defaults to `geometry.bin`. Optional: without it
+   * `/route` answers without the `geometry` polyline. */
+  GEOMETRY_KEY?: string;
 }
 
 /**
@@ -48,6 +52,25 @@ function storeFor(env: Env): GraphStore {
     stores.set(env.GRAPH_BUCKET, store);
   }
   return store;
+}
+
+const geometries = new WeakMap<R2Bucket, GeometrySource>();
+
+/** Range reads of `geometry.bin`, never the whole object (it is ~200 MB). */
+function geometryFor(env: Env): GeometrySource {
+  let source = geometries.get(env.GRAPH_BUCKET);
+  if (source === undefined) {
+    const key = env.GEOMETRY_KEY ?? 'geometry.bin';
+    source = createGeometrySource({
+      async read(offset, length) {
+        const object = await env.GRAPH_BUCKET.get(key, { range: { offset, length } });
+        if (object === null) throw new Error(`geometry object '${key}' not found in R2`);
+        return object.arrayBuffer();
+      },
+    });
+    geometries.set(env.GRAPH_BUCKET, source);
+  }
+  return source;
 }
 
 function graphUnavailable(err: unknown): Response {
@@ -72,6 +95,6 @@ export default {
       // only place the graph can be absent; every handler assumes it present.
       return graphUnavailable(err);
     }
-    return handleRequest(graph, request);
+    return handleRequest(graph, request, { geometry: geometryFor(env) });
   },
 };
