@@ -104,13 +104,18 @@ Actions → *Release* → *Run workflow*.
 New data does not need a release: upload the files to Drive, then on the server
 run `sudo bash /opt/isobike/bin/fetch-data.sh && sudo systemctl restart isobike`.
 
-### Switching to the domain
+### Domain
 
-Point the domain's DNS A record at the server, replace `:80` in
-`/etc/caddy/Caddyfile` with the domain (e.g. `isobike.ch, www.isobike.ch`), set
-the `email` line, and run `sudo systemctl reload caddy`. Caddy obtains the
-certificate itself. Update `DEPLOY_HOST` (and `DEPLOY_KNOWN_HOSTS`, if set) if
-you deploy via the domain name. The frontend uses same-origin URLs, so it needs no rebuild.
+The site runs on **isobike.ch** and **www.isobike.ch**; [Caddyfile](Caddyfile)
+names both, and Caddy obtains and renews the certificates itself. DNS at the
+registrar: `A` → the server's IPv4, `AAAA` → its IPv6 (`…::1`), `www` as `CNAME`
+→ `isobike.ch.`, optionally `CAA 0 issue "letsencrypt.org"`.
+
+On a new server, set up DNS first; until it points there, Caddy cannot get a
+certificate (replace the site line with `:80` meanwhile to serve plain HTTP on
+the IP). The `email` line for expiry notices is set on the server only, not in
+this public repo. `DEPLOY_HOST` may stay the IP. The frontend uses same-origin
+URLs, so it needs no rebuild.
 
 ## Secrets in a public repo
 
