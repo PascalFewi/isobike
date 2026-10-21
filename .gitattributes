@@ -4,3 +4,6 @@ testdata/ridge_world/*.json text eol=lf
 # Binary data: never touch line endings.
 *.bin binary
 *.pmtiles binary
+
+# Shell scripts run on Linux servers: always LF, also in Windows checkouts.
+*.sh text eol=lf

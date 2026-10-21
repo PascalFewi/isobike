@@ -1,12 +1,13 @@
 /**
- * Low-zoom reach display: isolines at the band edges plus a soft area fill,
- * both computed client-side from the Worker's min-time grid (1 km cells).
+ * Reach display up to region scale: isolines at the band edges plus a soft area
+ * fill, both computed client-side from the Worker's min-time grid (500 m cells).
  *
- * At country or canton scale a 200 m road line is a pixel of noise; an
- * isochrone reads instantly. The grid is smoothed first -- a 3x3 min filter
- * closes one-cell gaps between roads (with a small off-road penalty), then a
- * masked box blur softens the cell steps -- and marching squares traces each
- * band edge. The fill is the same smoothed field, banded and painted into an
+ * From country down to region scale a surface reads better than single roads.
+ * The grid is smoothed first -- a min filter closes the gaps between roads
+ * (~{@link GAP_REACH_KM}, with an off-road penalty per km), then a masked box
+ * blur softens the cell steps -- and marching squares traces each band edge.
+ * The filter reach and penalty are in km, so a change of grid size keeps the
+ * look. The fill is the same smoothed field, banded and painted into an
  * RGBA image that MapLibre drapes over the grid's bbox.
  *
  * Times are *displayed* minutes: Worker minutes plus the leg offset, divided by
@@ -17,10 +18,13 @@ import { BAND_COLORS, N_BANDS, bandStepS } from './colorScale.ts';
 import { GRID_NONE, type EffortGrid } from './effortResponse.ts';
 
 const INF = Number.POSITIVE_INFINITY;
-/** Extra minutes charged for borrowing a neighbour cell's time (off-road gap). */
-const GAP_PENALTY_MIN = 4;
+/** How far a reached road "fills" towards roadless cells, km. */
+const GAP_REACH_KM = 1;
+/** Extra minutes per km charged for that fill: it is not a road you ride. */
+const GAP_PENALTY_MIN_PER_KM = 4;
 const BLUR_RADIUS = 1;
 const MIN_WEIGHT = 0.3;
+const KM_PER_DEG_LAT = 110.54;
 
 /** Displayed minutes per cell, smoothed; Infinity where nothing is reached. */
 export function smoothField(grid: EffortGrid, offsetMin: number, factor: number): Float32Array {
@@ -29,19 +33,26 @@ export function smoothField(grid: EffortGrid, offsetMin: number, factor: number)
   for (let i = 0; i < raw.length; i++) {
     raw[i] = minutes[i] === GRID_NONE ? INF : (minutes[i] + offsetMin) / factor;
   }
+  // Min filter over a disc of GAP_REACH_KM, charging the off-road distance.
+  const cellKm = grid.cellLatDeg * KM_PER_DEG_LAT;
+  const r = Math.max(1, Math.round(GAP_REACH_KM / cellKm));
+  const offsets: Array<[number, number, number]> = [];
+  for (let dy = -r; dy <= r; dy++) {
+    for (let dx = -r; dx <= r; dx++) {
+      const d = Math.hypot(dx, dy);
+      if (d <= r + 0.5) offsets.push([dx, dy, d * cellKm * GAP_PENALTY_MIN_PER_KM]);
+    }
+  }
   const filled = new Float32Array(nx * ny);
   for (let y = 0; y < ny; y++) {
     for (let x = 0; x < nx; x++) {
       let m = INF;
-      for (let dy = -1; dy <= 1; dy++) {
+      for (const [dx, dy, pen] of offsets) {
+        const xx = x + dx;
         const yy = y + dy;
-        if (yy < 0 || yy >= ny) continue;
-        for (let dx = -1; dx <= 1; dx++) {
-          const xx = x + dx;
-          if (xx < 0 || xx >= nx) continue;
-          const v = raw[yy * nx + xx] + (dx !== 0 || dy !== 0 ? GAP_PENALTY_MIN : 0);
-          if (v < m) m = v;
-        }
+        if (xx < 0 || yy < 0 || xx >= nx || yy >= ny) continue;
+        const v = raw[yy * nx + xx] + pen;
+        if (v < m) m = v;
       }
       filled[y * nx + x] = m;
     }

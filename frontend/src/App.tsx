@@ -26,6 +26,7 @@ import * as api from './lib/api.ts';
 import type { EffortField } from './lib/effortResponse.ts';
 import { coordLabel, municipalityAt, type Place } from './lib/geocode.ts';
 import { buildGpx, downloadText, type Coord } from './lib/gpx.ts';
+import { BASEMAPS, DEFAULT_BASEMAP, type BasemapKey } from './lib/mapStyle.ts';
 import { FLAT_KMH_DEFAULT, displayTime, profileToSpeeds, riderVamHmh, speedFactor } from './lib/profile.ts';
 
 interface Waypoint {
@@ -52,14 +53,26 @@ function letter(i: number): string {
 
 let nextKey = 1;
 
+/** The background choice is a per-browser convenience; storage may be unavailable. */
+const BASEMAP_STORAGE_KEY = 'isobike.basemap';
+function storedBasemap(): BasemapKey {
+  try {
+    const v = localStorage.getItem(BASEMAP_STORAGE_KEY);
+    return v !== null && v in BASEMAPS ? (v as BasemapKey) : DEFAULT_BASEMAP;
+  } catch {
+    return DEFAULT_BASEMAP;
+  }
+}
+
 export function App(): JSX.Element {
-  const [controls, setControls] = useState<ControlState>({
+  const [controls, setControls] = useState<ControlState>(() => ({
     profileT: 0.5,
     maxSlope: null,
     surfaceMode: 'all',
     flatKmh: FLAT_KMH_DEFAULT,
     budgetHours: 4,
-  });
+    basemap: storedBasemap(),
+  }));
   const [waypoints, setWaypoints] = useState<Waypoint[]>([]);
   /** The field on screen, what it was computed for, and the leg offset it carries. */
   const [field, setField] = useState<{ data: EffortField; key: string; limitS: number; offsetS: number } | null>(null);
@@ -67,6 +80,14 @@ export function App(): JSX.Element {
   const legCache = useRef(new Map<string, api.RouteResult>());
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(BASEMAP_STORAGE_KEY, controls.basemap);
+    } catch {
+      // Private mode or blocked storage: the choice just is not remembered.
+    }
+  }, [controls.basemap]);
 
   const speeds = useMemo(() => profileToSpeeds(controls.profileT), [controls.profileT]);
   const factor = speedFactor(controls.flatKmh, speeds);
@@ -233,6 +254,7 @@ export function App(): JSX.Element {
         offsetS={field?.offsetS ?? 0}
         factor={factor}
         budgetHours={controls.budgetHours}
+        basemap={controls.basemap}
         waypoints={mapWaypoints}
         route={coords.length > 1 ? coords : null}
         hover={hover}

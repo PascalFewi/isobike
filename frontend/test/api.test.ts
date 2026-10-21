@@ -41,7 +41,7 @@ describe('effortField request', () => {
 
     expect(cap.url).toContain('/effort-field');
     expect(cap.body).toMatchObject({
-      lat: 46.5, lon: 8.03, v_flat: MIXED.vFlatMps, vam: MIXED.vamMps, max_cost: 28800, grid_km: 1,
+      lat: 46.5, lon: 8.03, v_flat: MIXED.vFlatMps, vam: MIXED.vamMps, max_cost: 28800, grid_km: 0.5,
     });
     expect(cap.body).not.toHaveProperty('fitness');
     expect(cap.body).not.toHaveProperty('alpha');

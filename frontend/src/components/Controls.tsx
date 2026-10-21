@@ -6,6 +6,7 @@
  */
 
 import { legendBands } from '../lib/colorScale.ts';
+import { BASEMAPS, type BasemapKey } from '../lib/mapStyle.ts';
 import { FLAT_KMH_MAX, FLAT_KMH_MIN, PROFILE_ANCHORS } from '../lib/profile.ts';
 
 export type SurfaceMode = 'all' | 'gravel-ok' | 'paved';
@@ -16,6 +17,7 @@ export interface ControlState {
   readonly surfaceMode: SurfaceMode;
   readonly flatKmh: number;
   readonly budgetHours: number;
+  readonly basemap: BasemapKey;
 }
 
 interface Props {
@@ -84,6 +86,21 @@ export function Controls({ state, vamHmh, onChange }: Props): JSX.Element {
           onChange={(e) => onChange({ budgetHours: Number(e.target.value) })}
         />
       </label>
+
+      <div className="ctl client" role="group" aria-labelledby="ctl-basemap-label">
+        <span className="ctl-head" id="ctl-basemap-label">Hintergrund</span>
+        <div className="seg">
+          {(Object.keys(BASEMAPS) as BasemapKey[]).map((k) => (
+            <button
+              key={k} type="button" id={`ctl-basemap-${k}`}
+              aria-pressed={state.basemap === k}
+              onClick={() => onChange({ basemap: k })}
+            >
+              {BASEMAPS[k].label}
+            </button>
+          ))}
+        </div>
+      </div>
 
       <div className="legend" aria-label="Legende Fahrzeit">
         {bands.map((b) => (

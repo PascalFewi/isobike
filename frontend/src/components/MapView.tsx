@@ -2,7 +2,7 @@
  * The MapLibre map. Imperative (MapLibre owns its canvas), wrapped so React drives
  * it via props. Not unit-tested -- WebGL needs a browser; verify with `npm run dev`.
  *
- * Three overlays, see mapStyle.ts for which shows at which zoom:
+ * The overlays, see mapStyle.ts for which shows at which zoom:
  *
  * - **Isolines + area** from the field's 1 km grid, recomputed client-side
  *   whenever the field, the leg offset, the speed or the budget changes.
@@ -34,6 +34,8 @@ import {
   STAMP_MIN_ZOOM,
   buildStyle,
   restyleRoads,
+  setBasemap,
+  type BasemapKey,
   roadLayers,
   routeLayers,
 } from '../lib/mapStyle.ts';
@@ -52,6 +54,7 @@ interface Props {
   /** Rider speed / profile speed: displayed time = Worker time / factor. */
   readonly factor: number;
   readonly budgetHours: number;
+  readonly basemap: BasemapKey;
   readonly waypoints: readonly MapWaypoint[];
   readonly route: readonly Coord[] | null;
   readonly hover: Coord | null;
@@ -66,6 +69,7 @@ export function MapView({
   offsetS,
   factor,
   budgetHours,
+  basemap,
   waypoints,
   route,
   hover,
@@ -93,7 +97,7 @@ export function MapView({
 
     const m = new maplibregl.Map({
       container: container.current,
-      style: buildStyle(),
+      style: buildStyle(basemap),
       center: [INITIAL_VIEW.lon, INITIAL_VIEW.lat],
       zoom: INITIAL_VIEW.zoom,
     });
@@ -180,6 +184,13 @@ export function MapView({
     if (m === null || !ready) return;
     restyleRoads(m, budgetHours, factor);
   }, [budgetHours, factor, ready]);
+
+  // Background switch: visibility only, so the overlays stay untouched.
+  useEffect(() => {
+    const m = map.current;
+    if (m === null || !ready) return;
+    setBasemap(m, basemap);
+  }, [basemap, ready]);
 
   // Route line.
   useEffect(() => {

@@ -1,16 +1,17 @@
 /**
  * MapLibre style + data-driven expressions for the reach map and the route.
  *
- * The display changes with zoom, because what reads well changes with scale:
+ * Two display levels, because what reads well changes with scale:
  *
- *   zoom <= 10   isolines at the band edges over a soft area fill, both drawn
- *                from the Worker's 1 km min-time grid (see isolines.ts) -- at
- *                country scale a road line is pixel noise
- *   zoom 10-13   halo + line: a wide translucent band-coloured halo merges
- *                valleys and plains into areas, a fine line on top shows which
- *                road actually gets you there
- *   zoom >= 13   lines by road class: main roads bold, tracks and paths fine,
- *                with a light casing -- here the single road matters
+ *   zoom <= 11   isolines at the band edges over a soft area fill, both drawn
+ *                from the Worker's 500 m min-time grid (see isolines.ts). A
+ *                surface reads cleanly from country down to region scale; per-
+ *                road colouring at these zooms looked dotted, because the low-
+ *                zoom tiles carry only part of the roads and short edges render
+ *                as blobs
+ *   zoom >= 11   lines by road class: main roads bold, tracks and paths fine,
+ *                with a light casing -- here the tiles are complete and the
+ *                single road matters
  *
  * The road layers are a join: the Worker's `(edge_id -> time)` field is pushed
  * onto the PMTiles line features via `setFeatureState` (the source uses
@@ -27,8 +28,7 @@ import type {
 } from 'maplibre-gl';
 
 import { BAND_COLORS, N_BANDS, bandStepS } from './colorScale.ts';
-import { widthStops } from './mapWidth.ts';
-import { PMTILES_URL, REFERENCE_LAT, TILE_LAYER } from '../config.ts';
+import { PMTILES_URL, TILE_LAYER } from '../config.ts';
 
 export const EFFORT_SOURCE = 'network';
 export const ISO_FILL_SOURCE = 'iso-fill';
@@ -38,7 +38,6 @@ export const HOVER_SOURCE = 'hover';
 
 export const ISO_FILL_LAYER = 'iso-fill';
 export const ISO_LINE_LAYER = 'iso-lines';
-export const HALO_LAYER = 'effort-halo';
 export const CASING_LAYER = 'effort-casing';
 export const LINE_LAYER = 'effort-line';
 export const ROUTE_CASING_LAYER = 'route-casing';
@@ -46,11 +45,11 @@ export const ROUTE_LAYER = 'route-line';
 export const HOVER_LAYER = 'hover-point';
 
 /** Zoom where the isolines hand over to the road lines (cross-fade +-0.5). */
-export const ISO_MAX_ZOOM = 10.5;
-/** Zoom where the halo fades out and the class lines take over. */
-export const CLASS_ZOOM = 13;
+export const ISO_MAX_ZOOM = 11;
+/** Zoom where the road lines are fully in. */
+export const CLASS_ZOOM = ISO_MAX_ZOOM;
 /** Below this zoom the road layers are invisible, so no feature-state is needed. */
-export const STAMP_MIN_ZOOM = 9;
+export const STAMP_MIN_ZOOM = ISO_MAX_ZOOM - 1;
 
 const TRANSPARENT = 'rgba(0,0,0,0)';
 
@@ -84,24 +83,13 @@ export function effortColorExpression(budgetHours: number, factor: number): Expr
   return ['case', HAS_TIME, step, TRANSPARENT] as unknown as ExpressionSpecification;
 }
 
-/** Halo opacity: fades in above the isolines, out as the class lines take over. */
-export function haloOpacityExpression(budgetHours: number, factor: number): ExpressionSpecification {
-  const on: ExpressionSpecification = ['case', inBudget(budgetHours, factor), 1, 0];
-  return [
-    'interpolate', ['linear'], ['zoom'],
-    ISO_MAX_ZOOM - 1, 0,
-    ISO_MAX_ZOOM, ['*', 0.3, on],
-    CLASS_ZOOM - 0.5, ['*', 0.22, on],
-    CLASS_ZOOM + 0.5, 0,
-  ] as unknown as ExpressionSpecification;
-}
-
+/** Road lines fade in as the isolines fade out. */
 export function lineOpacityExpression(budgetHours: number, factor: number): ExpressionSpecification {
   const on: ExpressionSpecification = ['case', inBudget(budgetHours, factor), 1, 0];
   return [
     'interpolate', ['linear'], ['zoom'],
-    ISO_MAX_ZOOM - 1, 0,
-    ISO_MAX_ZOOM, ['*', 0.95, on],
+    CLASS_ZOOM - 0.5, 0,
+    CLASS_ZOOM + 0.5, ['*', 0.95, on],
   ] as unknown as ExpressionSpecification;
 }
 
@@ -120,17 +108,10 @@ function classWidth(extra = 0): ExpressionSpecification {
     ['match', ROAD_CLASS, 0, main + extra, 1, local + extra, track + extra] as unknown as ExpressionSpecification;
   return [
     'interpolate', ['exponential', 1.6], ['zoom'],
-    10, byClass(1.6, 1.1, 0.8),
-    13, byClass(3.2, 2.2, 1.3),
-    16, byClass(9, 6, 3),
+    11, byClass(2.4, 1.6, 1.0),
+    13, byClass(4, 2.8, 1.6),
+    16, byClass(10, 7, 3.5),
   ] as unknown as ExpressionSpecification;
-}
-
-/** `line-width` for a fixed real width on the ground, floored at 2 px. */
-export function realWidthExpression(meters: number): ExpressionSpecification {
-  const expr: unknown[] = ['interpolate', ['exponential', 2], ['zoom']];
-  for (const [z, px] of widthStops(meters, REFERENCE_LAT)) expr.push(z, px);
-  return expr as unknown as ExpressionSpecification;
 }
 
 function roadLayer(id: string, paint: LineLayerSpecification['paint'], minzoom: number): LineLayerSpecification {
@@ -145,14 +126,9 @@ function roadLayer(id: string, paint: LineLayerSpecification['paint'], minzoom: 
   };
 }
 
-/** The road layers in draw order (halo, casing, line), styled for a budget and speed. */
+/** The road layers in draw order (casing, line), styled for a budget and speed. */
 export function roadLayers(budgetHours: number, factor: number): LineLayerSpecification[] {
   return [
-    roadLayer(HALO_LAYER, {
-      'line-color': effortColorExpression(budgetHours, factor),
-      'line-width': realWidthExpression(420),
-      'line-opacity': haloOpacityExpression(budgetHours, factor),
-    }, ISO_MAX_ZOOM - 1),
     roadLayer(CASING_LAYER, {
       'line-color': '#ffffff',
       'line-width': classWidth(2),
@@ -162,7 +138,7 @@ export function roadLayers(budgetHours: number, factor: number): LineLayerSpecif
       'line-color': effortColorExpression(budgetHours, factor),
       'line-width': classWidth(),
       'line-opacity': lineOpacityExpression(budgetHours, factor),
-    }, ISO_MAX_ZOOM - 1),
+    }, CLASS_ZOOM - 0.5),
   ];
 }
 
@@ -172,44 +148,78 @@ export function restyleRoads(
   budgetHours: number,
   factor: number,
 ): void {
-  const color = effortColorExpression(budgetHours, factor);
-  map.setPaintProperty(HALO_LAYER, 'line-color', color);
-  map.setPaintProperty(HALO_LAYER, 'line-opacity', haloOpacityExpression(budgetHours, factor));
   map.setPaintProperty(CASING_LAYER, 'line-opacity', casingOpacityExpression(budgetHours, factor));
-  map.setPaintProperty(LINE_LAYER, 'line-color', color);
+  map.setPaintProperty(LINE_LAYER, 'line-color', effortColorExpression(budgetHours, factor));
   map.setPaintProperty(LINE_LAYER, 'line-opacity', lineOpacityExpression(budgetHours, factor));
 }
 
+const SWISSTOPO = '© <a href="https://www.swisstopo.admin.ch" target="_blank" rel="noreferrer">swisstopo</a>';
+
 /**
- * swisstopo grey national map (`ch.swisstopo.pixelkarte-grau`): greyscale, so the
- * reach colours dominate, but with relief, contours and topographic detail for
- * orientation. Free, no key; CH coverage (all v1 needs).
+ * The selectable backgrounds. All are raster tiles in Web Mercator, free and
+ * keyless; each is its own source + layer, and only the visible one loads tiles.
+ *
+ * - grau: swisstopo grey national map -- greyscale, so the reach colours
+ *   dominate, with relief and topographic detail for orientation. CH only.
+ * - satellit: swisstopo SWISSIMAGE aerial imagery, 10 cm - 2 m. CH only.
+ * - osm: the OpenStreetMap standard map, worldwide. Served by the OSM
+ *   Foundation's volunteer-run tile servers, whose usage policy allows light
+ *   use with attribution; heavy traffic would need a commercial tile provider.
  */
-const BASEMAP_TILES = [
-  'https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-grau/default/current/3857/{z}/{x}/{y}.jpeg',
-];
-const BASEMAP_MAXZOOM = 19;
-const BASEMAP_ATTRIBUTION =
-  '© <a href="https://www.swisstopo.admin.ch" target="_blank" rel="noreferrer">swisstopo</a>';
+export const BASEMAPS = {
+  grau: {
+    label: 'Grau',
+    tiles: ['https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-grau/default/current/3857/{z}/{x}/{y}.jpeg'],
+    maxzoom: 19,
+    attribution: SWISSTOPO,
+  },
+  satellit: {
+    label: 'Satellit',
+    tiles: ['https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.swissimage/default/current/3857/{z}/{x}/{y}.jpeg'],
+    maxzoom: 20,
+    attribution: SWISSTOPO,
+  },
+  osm: {
+    label: 'OSM',
+    tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+    maxzoom: 19,
+    attribution: '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>-Mitwirkende',
+  },
+} as const;
+
+export type BasemapKey = keyof typeof BASEMAPS;
+export const DEFAULT_BASEMAP: BasemapKey = 'grau';
+
+const basemapLayerId = (key: BasemapKey): string => `basemap-${key}`;
+
+/** Show one background, hide the others (hidden raster layers fetch nothing). */
+export function setBasemap(
+  map: { setLayoutProperty(layer: string, prop: string, value: unknown): void },
+  key: BasemapKey,
+): void {
+  for (const k of Object.keys(BASEMAPS) as BasemapKey[]) {
+    map.setLayoutProperty(basemapLayerId(k), 'visibility', k === key ? 'visible' : 'none');
+  }
+}
 
 /** A 1x1 transparent PNG: the iso fill's placeholder before the first field. */
 export const EMPTY_PNG =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 const EMPTY_FC = { type: 'FeatureCollection' as const, features: [] };
 
-/** Base style: basemap, the network source, and the empty overlay sources. */
-export function buildStyle(): StyleSpecification {
+/** Base style: the backgrounds, the network source, and the empty overlay sources. */
+export function buildStyle(basemap: BasemapKey = DEFAULT_BASEMAP): StyleSpecification {
+  const keys = Object.keys(BASEMAPS) as BasemapKey[];
   return {
     version: 8,
     glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
     sources: {
-      basemap: {
-        type: 'raster',
-        tiles: BASEMAP_TILES,
-        tileSize: 256,
-        maxzoom: BASEMAP_MAXZOOM,
-        attribution: BASEMAP_ATTRIBUTION,
-      },
+      ...Object.fromEntries(
+        keys.map((k) => [
+          basemapLayerId(k),
+          { type: 'raster', tiles: [...BASEMAPS[k].tiles], tileSize: 256, maxzoom: BASEMAPS[k].maxzoom, attribution: BASEMAPS[k].attribution },
+        ]),
+      ),
       [EFFORT_SOURCE]: {
         type: 'vector',
         url: `pmtiles://${PMTILES_URL}`,
@@ -229,7 +239,12 @@ export function buildStyle(): StyleSpecification {
     },
     layers: [
       { id: 'bg', type: 'background', paint: { 'background-color': '#eef1f4' } },
-      { id: 'basemap', type: 'raster', source: 'basemap' },
+      ...keys.map((k) => ({
+        id: basemapLayerId(k),
+        type: 'raster' as const,
+        source: basemapLayerId(k),
+        layout: { visibility: k === basemap ? ('visible' as const) : ('none' as const) },
+      })),
       {
         id: ISO_FILL_LAYER,
         type: 'raster',

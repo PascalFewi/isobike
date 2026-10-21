@@ -73,7 +73,7 @@ export async function snap(at: LatLon): Promise<SnapResult> {
 }
 
 /** Cell size of the min-time grid the Worker returns for isolines, km. */
-export const GRID_KM = 1;
+export const GRID_KM = 0.5;
 
 /**
  * `POST /effort-field` -> binary reachability field plus the isoline grid. Uses
