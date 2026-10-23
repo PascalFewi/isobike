@@ -1,6 +1,6 @@
 /**
  * Bottom panel: the route's elevation profile over distance, with the waypoint
- * positions marked. Hovering reports the vertex under the pointer so the map can
+ * positions marked. Hovering (or dragging a finger) reports the vertex under the pointer so the map can
  * show where on the route that is.
  */
 
@@ -113,8 +113,11 @@ export function ElevationProfile({ coords, stops, letters, onHover }: Props): JS
       <div
         ref={box}
         className="profile-plot"
-        onMouseMove={(e) => pick(e.clientX)}
-        onMouseLeave={() => {
+        onPointerDown={(e) => pick(e.clientX)}
+        onPointerMove={(e) => pick(e.clientX)}
+        onPointerLeave={(e) => {
+          // A finger lifting also "leaves": keep its readout until the next touch.
+          if (e.pointerType !== 'mouse') return;
           setHoverI(null);
           onHover(null);
         }}

@@ -35,7 +35,6 @@ function profileLabel(t: number): string {
 }
 
 export function Controls({ state, vamHmh, onChange }: Props): JSX.Element {
-  const bands = legendBands(state.budgetHours);
   return (
     <aside className="panel controls" aria-label="Einstellungen">
       <label className="ctl net" htmlFor="ctl-profile">
@@ -102,18 +101,25 @@ export function Controls({ state, vamHmh, onChange }: Props): JSX.Element {
         </div>
       </div>
 
-      <div className="legend" aria-label="Legende Fahrzeit">
-        {bands.map((b) => (
-          <div className="legend-band" key={b.color}>
-            <i style={{ background: b.color }} />
-            <span>{b.from}–{b.to}</span>
-          </div>
-        ))}
-      </div>
+      <Legend budgetHours={state.budgetHours} />
 
       <p className="note">
         <span className="dot net" /> löst eine neue Berechnung aus · <span className="dot client" /> sofort, ohne Rechnen
       </p>
     </aside>
+  );
+}
+
+/** The ride-time colour bands; also shown on its own above the phone sheet. */
+export function Legend({ budgetHours }: { readonly budgetHours: number }): JSX.Element {
+  return (
+    <div className="legend" aria-label="Legende Fahrzeit">
+      {legendBands(budgetHours).map((b) => (
+        <div className="legend-band" key={b.color}>
+          <i style={{ background: b.color }} />
+          <span>{b.from}–{b.to}</span>
+        </div>
+      ))}
+    </div>
   );
 }

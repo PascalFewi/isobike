@@ -157,8 +157,36 @@ button.link:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; 
   font-size: 13px; color: #fff; background: rgba(17, 22, 29, 0.85); padding: 6px 12px; border-radius: 6px;
 }
 
+/* ---------------------------------------------------------------- phone: one bottom sheet with tabs (MobileSheet) */
 @media (max-width: 760px) {
-  .planner { width: auto; right: var(--gap); max-height: 45%; }
-  .controls { top: auto; bottom: calc(var(--gap) + var(--profile-h)); width: auto; left: var(--gap); max-height: 35%; }
-  .maplibregl-ctrl-top-right { right: var(--gap); top: 47%; }
+  .sheet {
+    position: absolute; z-index: 10; left: 0; right: 0; bottom: 0;
+    background: var(--panel); border-radius: 14px 14px 0 0;
+    box-shadow: 0 -2px 14px rgba(20, 30, 40, 0.18);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .sheet > .legend { padding: 10px 14px 0; }
+  .sheet-tabs { display: flex; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  .sheet-tabs button {
+    flex: 1; font: inherit; font-size: 14px; font-weight: 600; padding: 9px 6px; cursor: pointer;
+    border: 0; border-radius: 7px; background: transparent; color: var(--muted);
+  }
+  .sheet-tabs button[aria-selected="true"] { background: #eef0ec; color: var(--ink); }
+  .sheet-tabs button:focus-visible { outline: 2px solid var(--net); outline-offset: -2px; }
+  .sheet-tabs .sheet-toggle { flex: 0 0 44px; font-size: 16px; }
+  .sheet-body { max-height: 50vh; max-height: 50dvh; overflow-y: auto; overscroll-behavior: contain; }
+  .sheet-body[hidden] { display: none; }
+
+  /* The panels lose their floating frame inside the sheet. */
+  .sheet .panel { position: static; width: auto; max-height: none; overflow: visible; box-shadow: none; border-radius: 0; background: transparent; }
+  .sheet .profile { height: 150px; }
+  .sheet .profile-plot { touch-action: pan-y; }  /* horizontal drag scrubs, vertical still scrolls */
+  .sheet .controls .legend { display: none; }    /* already shown above the tabs */
+
+  .place input, .ctl select { font-size: 16px; } /* below 16px iOS zooms in on focus */
+  .row-actions button { width: 32px; height: 32px; }
+
+  .maplibregl-ctrl-top-right { top: var(--gap); right: var(--gap); }
+  .maplibregl-ctrl-bottom-right, .maplibregl-ctrl-bottom-left { bottom: var(--sheet-h, 0px); }
+  .status { max-width: calc(100% - 120px); text-align: center; }
 }

@@ -16,11 +16,12 @@
  * with some headroom and only refetched when the needed reach grows past it.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 
-import { Controls, type ControlState, type SurfaceMode } from './components/Controls.tsx';
+import { Controls, Legend, type ControlState, type SurfaceMode } from './components/Controls.tsx';
 import { ElevationProfile } from './components/ElevationProfile.tsx';
 import { MapView, type MapWaypoint } from './components/MapView.tsx';
+import { MobileSheet, type SheetTab } from './components/MobileSheet.tsx';
 import { Planner, type LegView } from './components/Planner.tsx';
 import * as api from './lib/api.ts';
 import type { EffortField } from './lib/effortResponse.ts';
@@ -64,7 +65,25 @@ function storedBasemap(): BasemapKey {
   }
 }
 
+/** Phones get the bottom sheet instead of floating panels; keep in step with index.css. */
+const MOBILE_QUERY = '(max-width: 760px)';
+
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(query);
+    const update = (): void => setMatches(mq.matches);
+    update();
+    mq.addEventListener('change', update);
+    return () => mq.removeEventListener('change', update);
+  }, [query]);
+  return matches;
+}
+
 export function App(): JSX.Element {
+  const mobile = useMediaQuery(MOBILE_QUERY);
+  const [sheetTab, setSheetTab] = useState<SheetTab | null>('route');
+  const [sheetH, setSheetH] = useState(0);
   const [controls, setControls] = useState<ControlState>(() => ({
     profileT: 0.5,
     maxSlope: null,
@@ -247,8 +266,36 @@ export function App(): JSX.Element {
   const hover = hoverIdx !== null && hoverIdx < coords.length ? coords[hoverIdx] : null;
   const showProfile = waypoints.length >= 2 && coords.length > 1;
 
+  const planner = (
+    <Planner
+      waypoints={waypoints.map((w, i) => ({ key: w.key, letter: letter(i), label: w.label }))}
+      legs={legViews}
+      canExport={coords.length > 1}
+      onSetPlace={setPlace}
+      onAddPlace={(p) => addAt(p.lat, p.lon, p.label)}
+      onRemove={remove}
+      onShift={shift}
+      onReverse={() => setWaypoints((ws) => [...ws].reverse())}
+      onClear={() => setWaypoints([])}
+      onExport={exportGpx}
+    />
+  );
+  const settings = (
+    <Controls
+      state={controls}
+      vamHmh={riderVamHmh(controls.flatKmh, speeds)}
+      onChange={(patch) => setControls((c) => ({ ...c, ...patch }))}
+    />
+  );
+  const profile = showProfile ? (
+    <ElevationProfile coords={coords} stops={stops} letters={waypoints.map((_, i) => letter(i))} onHover={setHoverIdx} />
+  ) : null;
+
   return (
-    <div className={`app${showProfile ? ' with-profile' : ''}`}>
+    <div
+      className={`app${showProfile && !mobile ? ' with-profile' : ''}`}
+      style={mobile ? ({ '--sheet-h': `${sheetH}px` } as CSSProperties) : undefined}
+    >
       <MapView
         field={field?.data ?? null}
         offsetS={field?.offsetS ?? 0}
@@ -261,25 +308,20 @@ export function App(): JSX.Element {
         onPick={(lat, lon) => addAt(lat, lon)}
         onMoveWaypoint={moveTo}
       />
-      <Planner
-        waypoints={waypoints.map((w, i) => ({ key: w.key, letter: letter(i), label: w.label }))}
-        legs={legViews}
-        canExport={coords.length > 1}
-        onSetPlace={setPlace}
-        onAddPlace={(p) => addAt(p.lat, p.lon, p.label)}
-        onRemove={remove}
-        onShift={shift}
-        onReverse={() => setWaypoints((ws) => [...ws].reverse())}
-        onClear={() => setWaypoints([])}
-        onExport={exportGpx}
-      />
-      <Controls
-        state={controls}
-        vamHmh={riderVamHmh(controls.flatKmh, speeds)}
-        onChange={(patch) => setControls((c) => ({ ...c, ...patch }))}
-      />
-      {showProfile && (
-        <ElevationProfile coords={coords} stops={stops} letters={waypoints.map((_, i) => letter(i))} onHover={setHoverIdx} />
+      {mobile ? (
+        <MobileSheet
+          tab={sheetTab === 'profile' && !showProfile ? 'route' : sheetTab}
+          onTab={setSheetTab}
+          panels={{ route: planner, settings, profile }}
+          legend={field !== null ? <Legend budgetHours={controls.budgetHours} /> : null}
+          onHeight={setSheetH}
+        />
+      ) : (
+        <>
+          {planner}
+          {settings}
+          {profile}
+        </>
       )}
       {status !== null && <div className="status" role="status">{status}</div>}
     </div>
