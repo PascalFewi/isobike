@@ -37,6 +37,9 @@ html, body, #root { margin: 0; height: 100%; }
 }
 .brand { display: flex; align-items: baseline; justify-content: space-between; }
 .brand h1 { font-size: 20px; font-weight: 780; font-stretch: 80%; margin: 0; letter-spacing: -0.01em; }
+.brand .gh { display: inline-grid; place-items: center; margin-left: 8px; padding: 3px; vertical-align: 1px; color: var(--muted); border-radius: 4px; }
+.brand .gh:hover { color: var(--ink); }
+.brand .gh:focus-visible { outline: 2px solid var(--net); outline-offset: 1px; }
 button.link { all: unset; cursor: pointer; color: var(--muted); font-size: 13px; text-decoration: underline; }
 button.link:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
 
