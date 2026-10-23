@@ -1,0 +1,27 @@
+# Live visitor stats from Caddy's access log, served by Caddy at
+# https://isobike.ch/stats/ behind a password (see the Caddyfile and
+# deploy/README.md). Installed to /etc/systemd/system/goaccess.service by
+# deploy/setup-server.sh.
+#
+# Runs as `caddy`, which owns the log. Writes one self-updating HTML page and
+# pushes new numbers over a WebSocket on localhost:7890, which Caddy proxies at
+# /stats/ws. --persist/--restore keep the totals across restarts and log
+# rotation; --ignore-crawlers drops known bots.
+
+[Unit]
+Description=GoAccess live stats for isobike
+After=network.target caddy.service
+
+[Service]
+User=caddy
+Group=caddy
+StateDirectory=goaccess
+ExecStartPre=/usr/bin/mkdir -p /var/lib/goaccess/www /var/lib/goaccess/db
+ExecStart=/usr/bin/goaccess /var/log/caddy/isobike.log --log-format=CADDY --ignore-crawlers \
+  --real-time-html --addr=127.0.0.1 --port=7890 --ws-url=wss://isobike.ch:443/stats/ws \
+  -o /var/lib/goaccess/www/index.html --persist --restore --db-path=/var/lib/goaccess/db
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

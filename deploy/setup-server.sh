@@ -7,7 +7,7 @@
 #   git clone https://github.com/PascalFewi/isobike.git && cd isobike
 #   sudo bash deploy/setup-server.sh "ssh-ed25519 AAAA... github-deploy"
 #
-# Installs Node 22, Caddy and gdown; creates the `isobike` service user and the
+# Installs Node 22, Caddy, GoAccess and gdown; creates the `isobike` service user and the
 # `deploy` user GitHub Actions logs in as (allowed to run exactly one sudo
 # command: restarting the API); lays out /opt/isobike; opens ports 22/80/443;
 # downloads the data from Google Drive. Safe to run again.
@@ -22,7 +22,7 @@ log() { echo "== $*"; }
 
 log "packages"
 apt-get update -qq
-apt-get install -y -qq curl ca-certificates gnupg debian-keyring debian-archive-keyring apt-transport-https ufw pipx
+apt-get install -y -qq curl ca-certificates gnupg debian-keyring debian-archive-keyring apt-transport-https ufw pipx goaccess
 
 if ! command -v node >/dev/null || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 22 ]; then
   log "Node 22"
@@ -66,9 +66,14 @@ log "systemd + Caddy"
 install -m 0644 "$REPO_DIR/deploy/isobike.service" /etc/systemd/system/isobike.service
 install -d -m 0755 /var/log/caddy && chown caddy:caddy /var/log/caddy
 install -m 0644 "$REPO_DIR/deploy/Caddyfile" /etc/caddy/Caddyfile
+install -m 0644 "$REPO_DIR/deploy/goaccess.service" /etc/systemd/system/goaccess.service
+install -d -m 0755 /etc/systemd/system/caddy.service.d
+install -m 0644 "$REPO_DIR/deploy/caddy-stats.conf" /etc/systemd/system/caddy.service.d/stats.conf
 systemctl daemon-reload
 systemctl enable isobike
-systemctl reload caddy || systemctl restart caddy
+systemctl restart caddy   # restart, not reload: picks up the stats.env drop-in
+touch /var/log/caddy/isobike.log && chown caddy:caddy /var/log/caddy/isobike.log
+systemctl enable --now goaccess
 
 log "firewall"
 ufw allow OpenSSH >/dev/null

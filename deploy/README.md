@@ -18,6 +18,8 @@ browser ── Caddy :80/:443 ──┬─ /            frontend (static, curren
 | [activate.sh](activate.sh) | switches to an uploaded release; rolls back if the health check fails |
 | [Caddyfile](Caddyfile) | web server: frontend, public data, `/api` → Node, TLS once there is a domain |
 | [isobike.service](isobike.service) | systemd unit for the routing API |
+| [goaccess.service](goaccess.service) | live visitor stats from Caddy's log, at `/stats/` |
+| [caddy-stats.conf](caddy-stats.conf) | systemd drop-in: Caddy reads the stats login from a server-only file |
 | [../.github/workflows/release.yml](../.github/workflows/release.yml) | test, build and deploy on a published release |
 
 ## Data
@@ -79,7 +81,7 @@ on the default branch are never deployed.
    # the argument is the content of isobike_deploy.pub from your PC (one line)
    sudo bash deploy/setup-server.sh "ssh-ed25519 AAAA... github-deploy"
    ```
-   This installs Node 22, Caddy and gdown, creates the users `isobike` (runs the
+   This installs Node 22, Caddy, GoAccess and gdown, creates the users `isobike` (runs the
    API) and `deploy` (GitHub logs in as this user and may only restart the API),
    opens ports 22/80/443 and downloads the data from Google Drive.
 4. In GitHub: **Settings → Environments → New environment `production`**, and add
@@ -117,6 +119,30 @@ the IP). The `email` line for expiry notices is set on the server only, not in
 this public repo. `DEPLOY_HOST` may stay the IP. The frontend uses same-origin
 URLs, so it needs no rebuild.
 
+## Visitor stats
+
+**https://isobike.ch/stats/** shows a live GoAccess dashboard built from Caddy's
+access log: visitors per day, pages, `/api` calls, browsers, phone vs. desktop.
+No tracking script and no cookies; known bots are left out. It needs a login,
+which lives only on the server. Until one is set, `/stats/` stays locked.
+
+Set or change the login (as root):
+
+```bash
+caddy hash-password                       # type the password, copy the $2a$... line
+cat > /etc/caddy/stats.env <<'EOF'
+STATS_USER=pascal
+STATS_PASS_HASH='$2a$14$...paste here...'
+EOF
+chmod 600 /etc/caddy/stats.env
+systemctl restart caddy                   # restart, not reload: re-reads the file
+```
+
+Keep the single quotes around the hash, since it contains `$`. If the page loads
+but its numbers do not update, the WebSocket is not getting through:
+`journalctl -u goaccess`. The real visitors are best counted by the visitors
+of `/api/effort-field`: only people who set a start point call it.
+
 ## Secrets in a public repo
 
 - **Nothing secret is in the repo, and nothing needs to be.** The app uses no
@@ -136,6 +162,9 @@ URLs, so it needs no rebuild.
   machine would receive the release package (public code anyway) and could fake
   a successful deploy, but it could not use the deploy key on the real server.
   Set it if you want deploys to fail loudly in that case.
+- **The stats login is server-only.** The Caddyfile reads it from
+  `/etc/caddy/stats.env`. Its fallback hash in the repo belongs to a random
+  password that was thrown away, so it unlocks nothing.
 - **Never commit** `.env.local`, private keys, or server passwords. `.gitignore`
   already excludes `.env.local`; check `git status` before committing.
 - The server IP is not a secret as such, but it is kept in `DEPLOY_HOST` so the

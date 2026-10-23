@@ -33,6 +33,20 @@ isobike.ch, www.isobike.ch {
 		respond 404
 	}
 
+	# Live visitor stats (GoAccess, deploy/goaccess.service), password only.
+	# The login comes from /etc/caddy/stats.env on the server (deploy/caddy-stats.conf);
+	# without it, the fallback is the hash of a random password nobody knows, so
+	# /stats stays locked instead of Caddy failing to start.
+	redir /stats /stats/
+	handle_path /stats/* {
+		basic_auth {
+			{$STATS_USER:stats} {$STATS_PASS_HASH:$2a$14$yom3urmlTvNbEAo27SD2AOu84BkOLB6cuqbQc56NF5rRKKr2u5cpm}
+		}
+		reverse_proxy /ws 127.0.0.1:7890
+		root * /var/lib/goaccess/www
+		file_server
+	}
+
 	# The single-page frontend of the active release.
 	handle {
 		root * /opt/isobike/current/frontend
