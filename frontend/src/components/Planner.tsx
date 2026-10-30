@@ -1,10 +1,14 @@
 /**
- * Left panel, after komoot: the route as a list of waypoints (each also typed as
- * a place), the totals and the legs, and the GPX export.
+ * Left panel, after komoot: time budget and bike on top, then the route as a
+ * list of waypoints (each also typed as a place), the totals and the legs, and
+ * the GPX export.
  */
+
+import { useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 
 import type { Place } from '../lib/geocode.ts';
 import { SURFACES, SURFACE_INFO, type SurfaceKey } from '../lib/surface.ts';
+import { dropIndex } from '../lib/waypoints.ts';
 import { GitHubIcon, REPO_URL } from './Footer.tsx';
 import { PlaceInput } from './PlaceInput.tsx';
 
@@ -26,6 +30,8 @@ export interface LegView {
 
 interface Props {
   readonly waypoints: readonly PlannerWaypoint[];
+  /** Budget and bike controls (Controls.tsx), shown under the title. */
+  readonly trip: ReactNode;
   readonly legs: ReadonlyArray<LegView | null>;
   /** Metres per surface over the whole route. */
   readonly surfaceM: Readonly<Record<SurfaceKey, number>>;
@@ -34,7 +40,11 @@ interface Props {
   readonly onAddPlace: (place: Place) => void;
   readonly onRemove: (index: number) => void;
   readonly onShift: (index: number, delta: -1 | 1) => void;
+  /** Drag and drop in the list: the waypoint at `from` to index `to`. */
+  readonly onMove: (from: number, to: number) => void;
   readonly onReverse: () => void;
+  /** Same way back: the waypoints again in reverse. */
+  readonly onRoundTrip: () => void;
   readonly onClear: () => void;
   readonly onExport: () => void;
 }
@@ -46,21 +56,77 @@ export function hm(seconds: number): string {
   return h > 0 ? `${h} h ${String(m).padStart(2, '0')}` : `${m} min`;
 }
 
-function km(m: number): string {
+export function km(m: number): string {
   return `${(m / 1000).toFixed(m < 10_000 ? 1 : 0)} km`;
 }
 
-export function Planner(props: Props): JSX.Element {
-  const { waypoints, legs } = props;
+export interface RouteTotals {
+  readonly timeS: number;
+  readonly distM: number;
+  readonly ascentM: number;
+  readonly descentM: number;
+  readonly maxSlopePct: number;
+}
+
+/** The found legs summed up; the planner and the export dialog show the same numbers. */
+export function routeTotals(legs: ReadonlyArray<LegView | null>): RouteTotals {
   const done = legs.filter((l): l is LegView => l !== null && l.found);
-  const broken = legs.some((l) => l !== null && !l.found);
-  const total = {
+  return {
     timeS: done.reduce((s, l) => s + l.timeS, 0),
     distM: done.reduce((s, l) => s + l.distM, 0),
     ascentM: done.reduce((s, l) => s + l.ascentM, 0),
     descentM: done.reduce((s, l) => s + l.descentM, 0),
     maxSlopePct: done.reduce((s, l) => Math.max(s, l.maxSlopePct), 0),
   };
+}
+
+/** Ascent, descent, steepest stretch, average speed: the small facts line. */
+export function Facts({ total }: { readonly total: RouteTotals }): JSX.Element {
+  return (
+    <div className="small">
+      <span title="Aufstieg">↑ {Math.round(total.ascentM)} Hm</span>
+      <span title="Abstieg">↓ {Math.round(total.descentM)} Hm</span>
+      <span title="steilste 200 m">max {total.maxSlopePct.toFixed(1)} %</span>
+      {total.timeS > 0 && <span title="Durchschnittsgeschwindigkeit">Ø {((total.distM / total.timeS) * 3.6).toFixed(1)} km/h</span>}
+    </div>
+  );
+}
+
+export function Planner(props: Props): JSX.Element {
+  const { waypoints, legs } = props;
+  const rows = useRef<Array<HTMLLIElement | null>>([]);
+  /** A badge being dragged: its row and where it would land. */
+  const [drag, setDrag] = useState<{ from: number; to: number } | null>(null);
+
+  const landing = (from: number, y: number): number =>
+    dropIndex(
+      waypoints.map((_, i) => {
+        const r = rows.current[i]?.getBoundingClientRect();
+        return r === undefined ? 0 : r.top + r.height / 2;
+      }),
+      from,
+      y,
+    );
+  const dragStart = (e: ReactPointerEvent, i: number): void => {
+    if (waypoints.length < 2) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setDrag({ from: i, to: i });
+  };
+  const dragMove = (e: ReactPointerEvent): void => {
+    if (drag !== null) setDrag({ from: drag.from, to: landing(drag.from, e.clientY) });
+  };
+  const dragEnd = (): void => {
+    if (drag !== null && drag.to !== drag.from) props.onMove(drag.from, drag.to);
+    setDrag(null);
+  };
+  /** Drop line above or below a row, where the dragged one would go. */
+  const dropMark = (i: number): string => {
+    if (drag === null || drag.to === drag.from || i !== drag.to) return '';
+    return drag.to < drag.from ? ' drop-above' : ' drop-below';
+  };
+  const broken = legs.some((l) => l !== null && !l.found);
+  const total = routeTotals(legs);
 
   return (
     <aside className="panel planner" aria-label="Route">
@@ -79,15 +145,13 @@ export function Planner(props: Props): JSX.Element {
         )}
       </header>
 
+      {props.trip}
+
       {waypoints.length >= 2 && (
         <section className="totals" aria-label="Gesamt">
           <div className="big"><strong>{hm(total.timeS)}</strong><span>Fahrzeit</span></div>
           <div className="big"><strong>{km(total.distM)}</strong><span>Distanz</span></div>
-          <div className="small">
-            <span title="Aufstieg">↑ {Math.round(total.ascentM)} Hm</span>
-            <span title="Abstieg">↓ {Math.round(total.descentM)} Hm</span>
-            <span title="steilste 200 m">max {total.maxSlopePct.toFixed(1)} %</span>
-          </div>
+          <Facts total={total} />
           <SurfaceBar surfaceM={props.surfaceM} />
           {broken && <p className="warn">Ein Abschnitt ist mit diesen Filtern nicht befahrbar.</p>}
         </section>
@@ -95,8 +159,23 @@ export function Planner(props: Props): JSX.Element {
 
       <ol className="waypoints">
         {waypoints.map((w, i) => (
-          <li key={w.key}>
-            <span className={`badge${i === 0 ? ' start' : ''}`}>{w.letter}</span>
+          <li
+            key={w.key}
+            ref={(el) => {
+              rows.current[i] = el;
+            }}
+            className={`${drag?.from === i ? 'dragging' : ''}${dropMark(i)}`}
+          >
+            <span
+              className={`badge${i === 0 ? ' start' : ''}${waypoints.length > 1 ? ' grab' : ''}`}
+              title={waypoints.length > 1 ? 'Ziehen, um die Reihenfolge zu ändern' : undefined}
+              onPointerDown={(e) => dragStart(e, i)}
+              onPointerMove={dragMove}
+              onPointerUp={dragEnd}
+              onPointerCancel={() => setDrag(null)}
+            >
+              {w.letter}
+            </span>
             <PlaceInput
               id={`wp-${w.key}`}
               value={w.label}
@@ -108,7 +187,12 @@ export function Planner(props: Props): JSX.Element {
               <button type="button" aria-label={`${w.letter} nach unten`} disabled={i === waypoints.length - 1} onClick={() => props.onShift(i, 1)}>↓</button>
               <button type="button" aria-label={`${w.letter} entfernen`} onClick={() => props.onRemove(i)}>×</button>
             </span>
-            {i < legs.length && <LegLine leg={legs[i]} />}
+            {i < legs.length ? (
+              <LegLine leg={legs[i]} />
+            ) : (
+              // The last point has no leg after it: keep the line, so the add row sits at the same distance.
+              <div className="leg" aria-hidden="true">&nbsp;</div>
+            )}
           </li>
         ))}
         <li className="add">
@@ -124,6 +208,7 @@ export function Planner(props: Props): JSX.Element {
 
       <div className="actions">
         <button type="button" disabled={!props.canExport} onClick={props.onExport}>GPX exportieren</button>
+        <button type="button" className="secondary" disabled={waypoints.length < 2} onClick={props.onRoundTrip}>Hin und zurück</button>
         <button type="button" className="secondary" disabled={waypoints.length < 2} onClick={props.onReverse}>Umkehren</button>
       </div>
 
@@ -138,7 +223,7 @@ export function Planner(props: Props): JSX.Element {
 }
 
 /** Belag: one stacked bar plus km per surface, like komoot's way types. */
-function SurfaceBar({ surfaceM }: { readonly surfaceM: Readonly<Record<SurfaceKey, number>> }): JSX.Element | null {
+export function SurfaceBar({ surfaceM }: { readonly surfaceM: Readonly<Record<SurfaceKey, number>> }): JSX.Element | null {
   const total = SURFACES.reduce((s, k) => s + surfaceM[k], 0);
   if (total <= 0) return null;
   const shown = SURFACES.filter((k) => surfaceM[k] > 0);
@@ -161,7 +246,7 @@ function SurfaceBar({ surfaceM }: { readonly surfaceM: Readonly<Record<SurfaceKe
   );
 }
 
-function LegLine({ leg }: { readonly leg: LegView | null }): JSX.Element {
+export function LegLine({ leg }: { readonly leg: LegView | null }): JSX.Element {
   if (leg === null) return <div className="leg loading">berechne…</div>;
   if (!leg.found) return <div className="leg none">nicht erreichbar</div>;
   return (

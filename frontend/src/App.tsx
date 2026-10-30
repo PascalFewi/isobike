@@ -18,11 +18,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 
-import { Controls, Legend, type ControlState, type SurfaceMode } from './components/Controls.tsx';
+import { Legend, TripControls, type BikeType, type ControlState } from './components/Controls.tsx';
 import { ElevationProfile } from './components/ElevationProfile.tsx';
+import { ExportDialog } from './components/ExportDialog.tsx';
 import { Footer } from './components/Footer.tsx';
-import { MapSettings } from './components/MapSettings.tsx';
-import { MapView, type MapWaypoint } from './components/MapView.tsx';
+import { MapButtons } from './components/MapButtons.tsx';
+import { MapView, type MapWaypoint, type WaypointAction } from './components/MapView.tsx';
 import { MobileSheet, type SheetTab } from './components/MobileSheet.tsx';
 import { Planner, type LegView } from './components/Planner.tsx';
 import * as api from './lib/api.ts';
@@ -31,6 +32,7 @@ import { coordLabel, municipalityAt, type Place } from './lib/geocode.ts';
 import { buildGpx, downloadText } from './lib/gpx.ts';
 import { FLAT_KMH_DEFAULT, displayTime, profileToSpeeds, riderVamHmh, speedFactor } from './lib/profile.ts';
 import { joinLegs, surfaceTotals } from './lib/surface.ts';
+import { moveItem, outAndBack } from './lib/waypoints.ts';
 
 interface Waypoint {
   readonly key: number;
@@ -44,9 +46,10 @@ const FIELD_HEADROOM = 1.25;
 /** Wait this long after the last change before fetching a field (slider drags). */
 const FIELD_DEBOUNCE_MS = 200;
 
-function surfacesFor(mode: SurfaceMode): number[] | undefined {
-  if (mode === 'all') return undefined;
-  if (mode === 'gravel-ok') return [api.Surface.Paved, api.Surface.Gravel];
+/** The surfaces a bike may route on; undefined = all. */
+function surfacesFor(bike: BikeType): number[] | undefined {
+  if (bike === 'mtb') return undefined;
+  if (bike === 'gravel') return [api.Surface.Paved, api.Surface.Gravel];
   return [api.Surface.Paved];
 }
 
@@ -78,9 +81,10 @@ export function App(): JSX.Element {
   const [controls, setControls] = useState<ControlState>(() => ({
     profileT: 0.5,
     maxSlope: null,
-    surfaceMode: 'all',
+    bike: 'mtb',
     flatKmh: FLAT_KMH_DEFAULT,
     budgetHours: 4,
+    isochrones: true,
     roadTypes: true,
     pois: true,
   }));
@@ -91,17 +95,28 @@ export function App(): JSX.Element {
   const legCache = useRef(new Map<string, api.RouteResult>());
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  /** Index of the waypoint waiting for a map click to move there, if any. */
+  const [moving, setMoving] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (moving === null) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setMoving(null);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [moving]);
 
   const speeds = useMemo(() => profileToSpeeds(controls.profileT), [controls.profileT]);
   const factor = speedFactor(controls.flatKmh, speeds);
   const filters = useMemo<api.FilterOptions>(() => {
-    const surfaces = surfacesFor(controls.surfaceMode);
+    const surfaces = surfacesFor(controls.bike);
     return {
       ...(controls.maxSlope !== null ? { maxSlopePct: controls.maxSlope } : {}),
       ...(surfaces !== undefined ? { surfaces } : {}),
     };
-  }, [controls.maxSlope, controls.surfaceMode]);
-  const routingKey = `${controls.profileT}|${controls.maxSlope}|${controls.surfaceMode}`;
+  }, [controls.maxSlope, controls.bike]);
+  const routingKey = `${controls.profileT}|${controls.maxSlope}|${controls.bike}`;
 
   // ---- legs --------------------------------------------------------------- //
   const legKey = (a: Waypoint, b: Waypoint): string => `${a.lat},${a.lon}>${b.lat},${b.lon}|${routingKey}`;
@@ -145,7 +160,8 @@ export function App(): JSX.Element {
   const fieldFresh = field !== null && field.key === fieldKey && field.limitS >= neededS;
 
   useEffect(() => {
-    if (last === undefined) {
+    // Isochrones switched off: no field at all, not even fetched.
+    if (last === undefined || !controls.isochrones) {
       setField(null);
       return;
     }
@@ -175,7 +191,7 @@ export function App(): JSX.Element {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [last, legsReady, fieldFresh, fieldKey, neededS, offsetS, speeds, filters]);
+  }, [last, legsReady, fieldFresh, fieldKey, neededS, offsetS, speeds, filters, controls.isochrones]);
 
   // ---- route polyline + elevation ----------------------------------------- //
   const { coords, stops, surfaceAt } = useMemo(() => joinLegs(legs), [legs]);
@@ -214,7 +230,26 @@ export function App(): JSX.Element {
     const w = waypoints[i];
     if (w !== undefined) nameLater(w.key, lat, lon);
   };
-  const remove = (i: number): void => setWaypoints((ws) => ws.filter((_, k) => k !== i));
+  const remove = (i: number): void => {
+    setWaypoints((ws) => ws.filter((_, k) => k !== i));
+    setMoving(null);
+  };
+  const roundTrip = (): void => setWaypoints((ws) => outAndBack(ws, (w) => ({ ...w, key: nextKey++ })));
+  const waypointAction = (i: number, action: WaypointAction): void => {
+    const w = waypoints[i];
+    if (w === undefined) return;
+    if (action === 'delete') remove(i);
+    else if (action === 'again') addAt(w.lat, w.lon, w.label);
+    else setMoving(i);
+  };
+  const pick = (lat: number, lon: number): void => {
+    if (moving !== null) {
+      moveTo(moving, lat, lon);
+      setMoving(null);
+    } else {
+      addAt(lat, lon);
+    }
+  };
   const shift = (i: number, d: -1 | 1): void =>
     setWaypoints((ws) => {
       const j = i + d;
@@ -224,8 +259,10 @@ export function App(): JSX.Element {
       return out;
     });
 
+  const tourName = `${waypoints[0]?.label ?? 'Start'} – ${last?.label ?? 'Ziel'}`;
+  const [exportOpen, setExportOpen] = useState(false);
   const exportGpx = (): void => {
-    const name = `${waypoints[0]?.label ?? 'Start'} – ${last?.label ?? 'Ziel'}`;
+    const name = tourName;
     const gpx = buildGpx(
       name,
       coords,
@@ -236,15 +273,18 @@ export function App(): JSX.Element {
   };
 
   const mapWaypoints: MapWaypoint[] = useMemo(
-    () => waypoints.map((w, i) => ({ lat: w.lat, lon: w.lon, letter: letter(i) })),
+    () => waypoints.map((w, i) => ({ lat: w.lat, lon: w.lon, letter: letter(i), label: w.label })),
     [waypoints],
   );
   const hover = hoverIdx !== null && hoverIdx < coords.length ? coords[hoverIdx] : null;
   const showProfile = waypoints.length >= 2 && coords.length > 1;
 
+  const change = (patch: Partial<ControlState>): void => setControls((c) => ({ ...c, ...patch }));
+
   const planner = (
     <Planner
       waypoints={waypoints.map((w, i) => ({ key: w.key, letter: letter(i), label: w.label }))}
+      trip={<TripControls state={controls} onChange={change} />}
       legs={legViews}
       surfaceM={surfaceM}
       canExport={coords.length > 1}
@@ -252,16 +292,11 @@ export function App(): JSX.Element {
       onAddPlace={(p) => addAt(p.lat, p.lon, p.label)}
       onRemove={remove}
       onShift={shift}
+      onMove={(from, to) => setWaypoints((ws) => moveItem(ws, from, to))}
       onReverse={() => setWaypoints((ws) => [...ws].reverse())}
+      onRoundTrip={roundTrip}
       onClear={() => setWaypoints([])}
-      onExport={exportGpx}
-    />
-  );
-  const settings = (
-    <Controls
-      state={controls}
-      vamHmh={riderVamHmh(controls.flatKmh, speeds)}
-      onChange={(patch) => setControls((c) => ({ ...c, ...patch }))}
+      onExport={() => setExportOpen(true)}
     />
   );
   const profile = showProfile ? (
@@ -283,31 +318,50 @@ export function App(): JSX.Element {
         waypoints={mapWaypoints}
         route={coords.length > 1 ? coords : null}
         hover={hover}
-        onPick={(lat, lon) => addAt(lat, lon)}
+        onPick={pick}
+        onWaypointAction={waypointAction}
+        picking={moving !== null}
         onMoveWaypoint={moveTo}
       />
-      <MapSettings
-        roadTypes={controls.roadTypes}
-        pois={controls.pois}
-        onChange={(patch) => setControls((c) => ({ ...c, ...patch }))}
-      />
+      <MapButtons state={controls} vamHmh={riderVamHmh(controls.flatKmh, speeds)} onChange={change} />
       {mobile ? (
         <MobileSheet
           tab={sheetTab === 'profile' && !showProfile ? 'route' : sheetTab}
           onTab={setSheetTab}
-          panels={{ route: <>{planner}<Footer /></>, settings, profile }}
+          panels={{ route: <>{planner}<Footer /></>, settings: null, profile }}
           legend={field !== null ? <Legend budgetHours={controls.budgetHours} /> : null}
           onHeight={setSheetH}
         />
       ) : (
         <>
           {planner}
-          {settings}
           {profile}
           <Footer />
         </>
       )}
-      {status !== null && <div className="status" role="status">{status}</div>}
+      <ExportDialog
+        open={exportOpen}
+        onClose={() => setExportOpen(false)}
+        onDownload={exportGpx}
+        name={tourName}
+        controls={controls}
+        waypoints={waypoints.map((w, i) => ({ letter: letter(i), label: w.label }))}
+        legs={legViews}
+        surfaceM={surfaceM}
+        profile={
+          showProfile ? (
+            <ElevationProfile
+              className="in-dialog" coords={coords} surfaceAt={surfaceAt} stops={stops}
+              letters={waypoints.map((_, i) => letter(i))} onHover={() => undefined}
+            />
+          ) : null
+        }
+      />
+      {moving !== null ? (
+        <div className="status" role="status">Klick auf die Karte setzt {letter(moving)} neu · Esc bricht ab</div>
+      ) : (
+        status !== null && <div className="status" role="status">{status}</div>
+      )}
     </div>
   );
 }

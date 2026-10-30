@@ -30,6 +30,7 @@ import type { Coord } from '../lib/gpx.ts';
 import { ISO_LEVELS, fillImage, gridCorners, isolines, smoothField } from '../lib/isolines.ts';
 import { POI_INFO, POI_KINDS, POI_PIXEL_RATIO, POI_SUB_LABELS, poiImage, poiImageId, type PoiKind } from '../lib/pois.ts';
 import {
+  ELEVATION_ATTRIBUTION,
   EMPTY_PNG,
   HOVER_SOURCE,
   POI_LAYER,
@@ -48,7 +49,11 @@ export interface MapWaypoint {
   readonly lat: number;
   readonly lon: number;
   readonly letter: string;
+  readonly label: string;
 }
+
+/** What the waypoint menu (a click on a marker) offers. */
+export type WaypointAction = 'move' | 'delete' | 'again';
 
 interface Props {
   readonly field: EffortField | null;
@@ -64,6 +69,9 @@ interface Props {
   readonly hover: Coord | null;
   readonly onPick: (lat: number, lon: number) => void;
   readonly onMoveWaypoint: (index: number, lat: number, lon: number) => void;
+  readonly onWaypointAction: (index: number, action: WaypointAction) => void;
+  /** A waypoint waits for a map click to move there: crosshair cursor. */
+  readonly picking: boolean;
 }
 
 type GeoJsonSource = maplibregl.GeoJSONSource;
@@ -80,14 +88,17 @@ export function MapView({
   hover,
   onPick,
   onMoveWaypoint,
+  onWaypointAction,
+  picking,
 }: Props): JSX.Element {
   const container = useRef<HTMLDivElement | null>(null);
   const map = useRef<maplibregl.Map | null>(null);
   // Map style loaded: effects rerun once sources and layers exist.
   const [ready, setReady] = useState(false);
   const markers = useRef<maplibregl.Marker[]>([]);
-  const handlers = useRef({ onPick, onMoveWaypoint });
-  handlers.current = { onPick, onMoveWaypoint };
+  const handlers = useRef({ onPick, onMoveWaypoint, onWaypointAction });
+  handlers.current = { onPick, onMoveWaypoint, onWaypointAction };
+  const waypointPopup = useRef<maplibregl.Popup | null>(null);
 
   // Slider drags: the isoline work follows these deferred copies, so
   // React skips the intermediate values instead of computing every one of them.
@@ -106,8 +117,12 @@ export function MapView({
       style: BASEMAP_STYLE_URL,
       center: [INITIAL_VIEW.lon, INITIAL_VIEW.lat],
       zoom: INITIAL_VIEW.zoom,
+      // Our own control below: always open, never folded behind an "i".
+      attributionControl: false,
     });
     m.addControl(new maplibregl.NavigationControl(), 'top-right');
+    // Added before the scale so it sits at the very bottom of the corner.
+    m.addControl(new maplibregl.AttributionControl({ compact: false, customAttribution: ELEVATION_ATTRIBUTION }), 'bottom-right');
     m.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-right');
 
     m.on('load', () => {
@@ -218,27 +233,81 @@ export function MapView({
     });
   }, [hover, ready]);
 
-  // Waypoint markers: rebuilt on change; drag to move.
+  // Waypoint markers: rebuilt on change; drag to move, click for the menu.
   useEffect(() => {
     const m = map.current;
     if (m === null) return;
     for (const mk of markers.current) mk.remove();
+    waypointPopup.current?.remove();
     markers.current = waypoints.map((w, i) => {
       const el = document.createElement('div');
       el.className = `wp-marker${i === 0 ? ' start' : ''}`;
       el.textContent = w.letter;
-      // A click on a marker must not also reach the map and add a waypoint there.
-      el.addEventListener('click', (e) => e.stopPropagation());
       const mk = new maplibregl.Marker({ element: el, draggable: true }).setLngLat([w.lon, w.lat]).addTo(m);
+      // A drag ends in a click on the same element: that one is not a menu click.
+      let dragged = false;
+      mk.on('dragstart', () => {
+        dragged = true;
+      });
       mk.on('dragend', () => {
         const p = mk.getLngLat();
         handlers.current.onMoveWaypoint(i, p.lat, p.lng);
+      });
+      el.addEventListener('click', (e) => {
+        // A click on a marker must not also reach the map and add a waypoint there.
+        e.stopPropagation();
+        if (dragged) {
+          dragged = false;
+          return;
+        }
+        waypointPopup.current?.remove();
+        const popup = new maplibregl.Popup({ offset: 16, maxWidth: '220px', closeButton: false })
+          .setLngLat([w.lon, w.lat])
+          .setDOMContent(
+            waypointMenu(w, (action) => {
+              popup.remove();
+              handlers.current.onWaypointAction(i, action);
+            }),
+          )
+          .addTo(m);
+        waypointPopup.current = popup;
       });
       return mk;
     });
   }, [waypoints]);
 
+  // Moving a waypoint by click: crosshair until the click lands.
+  useEffect(() => {
+    const m = map.current;
+    if (m === null) return;
+    m.getCanvas().style.cursor = picking ? 'crosshair' : '';
+  }, [picking]);
+
   return <div ref={container} className="map" />;
+}
+
+/** The waypoint menu: its letter and place, then move / delete / add again. */
+function waypointMenu(w: MapWaypoint, act: (action: WaypointAction) => void): HTMLElement {
+  const el = document.createElement('div');
+  el.className = 'wp-menu';
+  const head = document.createElement('div');
+  head.className = 'wp-menu-head';
+  head.textContent = `${w.letter} · ${w.label}`;
+  el.append(head);
+  const items: Array<[WaypointAction, string]> = [
+    ['move', 'Verschieben'],
+    ['again', 'Nochmals hinzufügen'],
+    ['delete', 'Löschen'],
+  ];
+  for (const [action, text] of items) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = action === 'delete' ? 'danger' : '';
+    b.textContent = text;
+    b.addEventListener('click', () => act(action));
+    el.append(b);
+  }
+  return el;
 }
 
 /**

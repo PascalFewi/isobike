@@ -59,7 +59,7 @@ needs `sudo systemctl restart isobike`. The folder sharing must stay on
 available under the [ODbL](https://opendatacommons.org/licenses/odbl/); the
 derived files above are offered under the same licence. Elevation: swissALTI3D ©
 swisstopo (open government data), Copernicus GLO-30 (© DLR/Airbus, ESA) outside
-Switzerland. The basemap is swisstopo's grey national map.
+Switzerland. The basemap is OpenFreeMap (© OpenMapTiles, data from OpenStreetMap).
 
 ## Releases deploy the app
 

@@ -47,8 +47,17 @@ export const POI_LAYER = 'pois';
 export const isoFillSource = (level: number): string => `iso-fill-${level}`;
 export const isoLineSource = (level: number): string => `iso-lines-${level}`;
 
-const OSM_ATTRIBUTION =
-  '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>-Mitwirkende';
+/**
+ * Credits shown on the map, bottom right, always open (OSM's attribution
+ * guidelines want them visible on the map). The basemap style credits itself and
+ * OpenStreetMap -- the source of our network and POI tiles too, so those carry
+ * no second OSM credit. What the basemap cannot know: the elevation behind every
+ * slope and profile, swissALTI3D in Switzerland and Copernicus GLO-30 along the
+ * borders (build/dem.py).
+ */
+export const ELEVATION_ATTRIBUTION =
+  'Höhen © <a href="https://www.swisstopo.admin.ch" target="_blank" rel="noreferrer">swisstopo</a>, ' +
+  '<a href="https://spacedata.copernicus.eu/collections/copernicus-digital-elevation-model" target="_blank" rel="noreferrer">Copernicus DEM</a>';
 
 /** A 1x1 transparent PNG: an iso fill's placeholder while there is no field. */
 export const EMPTY_PNG =
@@ -156,8 +165,8 @@ export const ROAD_LAYER_IDS = roadLayers().map((l) => l.id);
 /** Our sources, added to the basemap style once it has loaded. */
 export function overlaySources(): Record<string, SourceSpecification> {
   return {
-    [NETWORK_SOURCE]: { type: 'vector', url: `pmtiles://${NETWORK_URL}`, attribution: OSM_ATTRIBUTION },
-    [POI_SOURCE]: { type: 'vector', url: `pmtiles://${POIS_URL}`, attribution: OSM_ATTRIBUTION },
+    [NETWORK_SOURCE]: { type: 'vector', url: `pmtiles://${NETWORK_URL}` },
+    [POI_SOURCE]: { type: 'vector', url: `pmtiles://${POIS_URL}` },
     ...Object.fromEntries(
       ISO_LEVELS.flatMap((_, i) => [
         [isoFillSource(i), { type: 'image', url: EMPTY_PNG, coordinates: [[5.9, 47.9], [10.6, 47.9], [10.6, 45.7], [5.9, 45.7]] }],

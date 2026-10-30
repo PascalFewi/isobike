@@ -17,10 +17,11 @@ interface Props {
   readonly stops: readonly number[];
   readonly letters: readonly string[];
   readonly onHover: (index: number | null) => void;
+  /** Extra class on the panel, e.g. to place it inside a dialog. */
+  readonly className?: string;
 }
 
-const H = 132;
-const PAD = { l: 44, r: 12, t: 12, b: 22 };
+const PAD = { l: 40, r: 10, t: 10, b: 20 };
 
 function niceStep(span: number, target: number): number {
   const raw = span / target;
@@ -28,15 +29,17 @@ function niceStep(span: number, target: number): number {
   return [1, 2, 5, 10].map((m) => m * p).find((s) => s >= raw) ?? 10 * p;
 }
 
-export function ElevationProfile({ coords, surfaceAt, stops, letters, onHover }: Props): JSX.Element {
+export function ElevationProfile({ coords, surfaceAt, stops, letters, onHover, className }: Props): JSX.Element {
   const box = useRef<HTMLDivElement | null>(null);
-  const [width, setWidth] = useState(800);
+  // The plot fills its box; the box's size comes from CSS (desktop and phone differ).
+  // Starts narrow so it never pushes its box wider before the first measurement.
+  const [size, setSize] = useState({ w: 240, h: 104 });
   const [hoverI, setHoverI] = useState<number | null>(null);
 
   useEffect(() => {
     const el = box.current;
     if (el === null) return;
-    const ro = new ResizeObserver(([e]) => setWidth(Math.max(240, e.contentRect.width)));
+    const ro = new ResizeObserver(([e]) => setSize({ w: Math.max(240, e.contentRect.width), h: Math.max(80, e.contentRect.height) }));
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
@@ -54,7 +57,8 @@ export function ElevationProfile({ coords, surfaceAt, stops, letters, onHover }:
     return [Math.floor((lo - pad) / 10) * 10, Math.ceil((hi + pad) / 10) * 10];
   }, [coords]);
 
-  const W = width;
+  const W = size.w;
+  const H = size.h;
   const x = (d: number): number => PAD.l + (total > 0 ? (d / total) * (W - PAD.l - PAD.r) : 0);
   const y = (z: number): number => PAD.t + (1 - (z - zMin) / (zMax - zMin || 1)) * (H - PAD.t - PAD.b);
 
@@ -73,7 +77,7 @@ export function ElevationProfile({ coords, surfaceAt, stops, letters, onHover }:
     const line = `M${pts.join('L')}`;
     return { line, area: `${line}L${x(total).toFixed(1)},${H - PAD.b}L${PAD.l},${H - PAD.b}Z` };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [coords, dist, W, zMin, zMax]);
+  }, [coords, dist, W, H, zMin, zMax]);
 
   // Surface strip along the x axis: one rect per run of equal surface.
   const strip = useMemo(() => {
@@ -125,7 +129,7 @@ export function ElevationProfile({ coords, surfaceAt, stops, letters, onHover }:
   })();
 
   return (
-    <section className="panel profile" aria-label="Höhenprofil">
+    <section className={`panel profile${className !== undefined ? ` ${className}` : ''}`} aria-label="Höhenprofil">
       <div
         ref={box}
         className="profile-plot"
