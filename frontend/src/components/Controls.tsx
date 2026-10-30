@@ -1,12 +1,11 @@
 /**
- * Right panel: rider and map settings, top to bottom in the order a rider sets
- * them. Profil, slope and surface change the route (a Worker call); flat speed
- * and budget only rescale and restyle (client-side). The two groups are marked
- * so the boundary stays visible in the UI, not just in the code.
+ * Right panel: rider settings, top to bottom in the order a rider sets them.
+ * Profil, slope and surface change the route (a Worker call); flat speed and
+ * budget only rescale and restyle (client-side). The map's own settings --
+ * background, POIs -- are in MapSettings, on the map.
  */
 
 import { legendBands } from '../lib/colorScale.ts';
-import { BASEMAPS, type BasemapKey } from '../lib/mapStyle.ts';
 import { FLAT_KMH_MAX, FLAT_KMH_MIN, PROFILE_ANCHORS } from '../lib/profile.ts';
 
 export type SurfaceMode = 'all' | 'gravel-ok' | 'paved';
@@ -17,7 +16,9 @@ export interface ControlState {
   readonly surfaceMode: SurfaceMode;
   readonly flatKmh: number;
   readonly budgetHours: number;
-  readonly basemap: BasemapKey;
+  /** Map display, set in MapSettings; kept here so all settings share one state. */
+  readonly roadTypes: boolean;
+  readonly pois: boolean;
 }
 
 interface Props {
@@ -37,7 +38,7 @@ function profileLabel(t: number): string {
 export function Controls({ state, vamHmh, onChange }: Props): JSX.Element {
   return (
     <aside className="panel controls" aria-label="Einstellungen">
-      <label className="ctl net" htmlFor="ctl-profile">
+      <label className="ctl" htmlFor="ctl-profile">
         <span className="ctl-head">Profil <strong>{profileLabel(state.profileT)}</strong></span>
         <input
           id="ctl-profile" type="range" min={0} max={1} step={0.01} value={state.profileT}
@@ -46,7 +47,7 @@ export function Controls({ state, vamHmh, onChange }: Props): JSX.Element {
         <span className="ends"><span>Flachfahrer</span><span>Bergfahrer</span></span>
       </label>
 
-      <label className="ctl net" htmlFor="ctl-slope">
+      <label className="ctl" htmlFor="ctl-slope">
         <span className="ctl-head">Max. Steigung <strong>{state.maxSlope === null ? 'aus' : `${state.maxSlope} %`}</strong></span>
         <input
           id="ctl-slope" type="range" min={0} max={20} step={1} value={state.maxSlope ?? 0}
@@ -57,7 +58,7 @@ export function Controls({ state, vamHmh, onChange }: Props): JSX.Element {
         />
       </label>
 
-      <label className="ctl net" htmlFor="ctl-surface">
+      <label className="ctl" htmlFor="ctl-surface">
         <span className="ctl-head">Untergrund</span>
         <select
           id="ctl-surface" value={state.surfaceMode}
@@ -69,7 +70,7 @@ export function Controls({ state, vamHmh, onChange }: Props): JSX.Element {
         </select>
       </label>
 
-      <label className="ctl client" htmlFor="ctl-speed">
+      <label className="ctl" htmlFor="ctl-speed">
         <span className="ctl-head">Geschwindigkeit im Flachen <strong>{state.flatKmh} km/h</strong></span>
         <input
           id="ctl-speed" type="range" min={FLAT_KMH_MIN} max={FLAT_KMH_MAX} step={1} value={state.flatKmh}
@@ -78,7 +79,7 @@ export function Controls({ state, vamHmh, onChange }: Props): JSX.Element {
         <span className="hint">bergauf ≈ {Math.round(vamHmh)} Hm/h</span>
       </label>
 
-      <label className="ctl client" htmlFor="ctl-budget">
+      <label className="ctl" htmlFor="ctl-budget">
         <span className="ctl-head">Zeitbudget <strong>{state.budgetHours} h</strong></span>
         <input
           id="ctl-budget" type="range" min={0.5} max={16} step={0.5} value={state.budgetHours}
@@ -86,26 +87,7 @@ export function Controls({ state, vamHmh, onChange }: Props): JSX.Element {
         />
       </label>
 
-      <div className="ctl client" role="group" aria-labelledby="ctl-basemap-label">
-        <span className="ctl-head" id="ctl-basemap-label">Hintergrund</span>
-        <div className="seg">
-          {(Object.keys(BASEMAPS) as BasemapKey[]).map((k) => (
-            <button
-              key={k} type="button" id={`ctl-basemap-${k}`}
-              aria-pressed={state.basemap === k}
-              onClick={() => onChange({ basemap: k })}
-            >
-              {BASEMAPS[k].label}
-            </button>
-          ))}
-        </div>
-      </div>
-
       <Legend budgetHours={state.budgetHours} />
-
-      <p className="note">
-        <span className="dot net" /> löst eine neue Berechnung aus · <span className="dot client" /> sofort, ohne Rechnen
-      </p>
     </aside>
   );
 }

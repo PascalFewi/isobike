@@ -4,6 +4,8 @@
  */
 
 import type { Place } from '../lib/geocode.ts';
+import { SURFACES, SURFACE_INFO, type SurfaceKey } from '../lib/surface.ts';
+import { GitHubIcon, REPO_URL } from './Footer.tsx';
 import { PlaceInput } from './PlaceInput.tsx';
 
 export interface PlannerWaypoint {
@@ -25,6 +27,8 @@ export interface LegView {
 interface Props {
   readonly waypoints: readonly PlannerWaypoint[];
   readonly legs: ReadonlyArray<LegView | null>;
+  /** Metres per surface over the whole route. */
+  readonly surfaceM: Readonly<Record<SurfaceKey, number>>;
   readonly canExport: boolean;
   readonly onSetPlace: (index: number, place: Place) => void;
   readonly onAddPlace: (place: Place) => void;
@@ -64,12 +68,10 @@ export function Planner(props: Props): JSX.Element {
         <h1>
           VeloRouter
           <a
-            className="gh" href="https://github.com/PascalFewi/isobike" target="_blank" rel="noopener noreferrer"
+            className="gh" href={REPO_URL} target="_blank" rel="noopener noreferrer"
             title="Code, Fragen und Feedback auf GitHub" aria-label="isobike auf GitHub"
           >
-            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-              <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
-            </svg>
+            <GitHubIcon />
           </a>
         </h1>
         {waypoints.length > 0 && (
@@ -86,6 +88,7 @@ export function Planner(props: Props): JSX.Element {
             <span title="Abstieg">↓ {Math.round(total.descentM)} Hm</span>
             <span title="steilste 200 m">max {total.maxSlopePct.toFixed(1)} %</span>
           </div>
+          <SurfaceBar surfaceM={props.surfaceM} />
           {broken && <p className="warn">Ein Abschnitt ist mit diesen Filtern nicht befahrbar.</p>}
         </section>
       )}
@@ -131,6 +134,30 @@ export function Planner(props: Props): JSX.Element {
         </p>
       )}
     </aside>
+  );
+}
+
+/** Belag: one stacked bar plus km per surface, like komoot's way types. */
+function SurfaceBar({ surfaceM }: { readonly surfaceM: Readonly<Record<SurfaceKey, number>> }): JSX.Element | null {
+  const total = SURFACES.reduce((s, k) => s + surfaceM[k], 0);
+  if (total <= 0) return null;
+  const shown = SURFACES.filter((k) => surfaceM[k] > 0);
+  return (
+    <div className="surface" aria-label="Belag">
+      <div className="surface-bar">
+        {shown.map((k) => (
+          <i key={k} style={{ width: `${(100 * surfaceM[k]) / total}%`, background: SURFACE_INFO[k].color }} />
+        ))}
+      </div>
+      <ul className="surface-list">
+        {shown.map((k) => (
+          <li key={k}>
+            <i style={{ background: SURFACE_INFO[k].color }} />
+            {SURFACE_INFO[k].label} {km(surfaceM[k])}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

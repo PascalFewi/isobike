@@ -101,11 +101,31 @@ export async function routeGeometry(
   nodes: readonly number[],
   edgeIds: readonly number[],
 ): Promise<Array<[number, number, number]>> {
+  return (await routeGeometryWithEdges(graph, reader, header, nodes, edgeIds)).coords;
+}
+
+/**
+ * {@link routeGeometry}, plus where each edge starts in the polyline:
+ * `edgeStart[i]` is the vertex index where `edgeIds[i]` begins (-1 when the edge
+ * had no geometry) -- what lets the surface be told per stretch of the line.
+ */
+export async function routeGeometryWithEdges(
+  graph: Graph,
+  reader: RangeReader,
+  header: GeometryHeader,
+  nodes: readonly number[],
+  edgeIds: readonly number[],
+): Promise<{ coords: Array<[number, number, number]>; edgeStart: number[] }> {
   const byId = await readEdgeVertices(reader, header, edgeIds);
   const coords: Array<[number, number, number]> = [];
+  const edgeStart: number[] = [];
   for (let i = 0; i < edgeIds.length; i++) {
     const v = byId.get(edgeIds[i]);
-    if (v === undefined || v.length < 6) continue;
+    if (v === undefined || v.length < 6) {
+      edgeStart.push(-1);
+      continue;
+    }
+    edgeStart.push(Math.max(0, coords.length - 1));
     const from = nodes[i];
     const n = v.length / 3;
     // Endpoints are stored as exactly the f32 node coordinates graph.bin holds.
@@ -115,7 +135,23 @@ export async function routeGeometry(
       coords.push([round(v[3 * j + 1], 1e6), round(v[3 * j], 1e6), round(v[3 * j + 2], 10)]);
     }
   }
-  return coords;
+  return { coords, edgeStart };
+}
+
+/**
+ * Surface along the polyline as runs `[firstVertex, surface]`, merged where
+ * neighbouring edges share a class: run k holds from its vertex to the next
+ * run's (or the line's end).
+ */
+export function surfaceRuns(graph: Graph, edgeIds: readonly number[], edgeStart: readonly number[]): Array<[number, number]> {
+  const runs: Array<[number, number]> = [];
+  for (let i = 0; i < edgeIds.length; i++) {
+    if (edgeStart[i] < 0) continue;
+    const surface = graph.edgeSurface[edgeIds[i]];
+    if (runs.length > 0 && runs[runs.length - 1][1] === surface) continue;
+    runs.push([edgeStart[i], surface]);
+  }
+  return runs;
 }
 
 function round(x: number, scale: number): number {

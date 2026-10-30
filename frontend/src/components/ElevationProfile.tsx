@@ -7,9 +7,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { cumulativeDistance, type Coord } from '../lib/gpx.ts';
+import { SURFACE_INFO, surfaceOfClass } from '../lib/surface.ts';
 
 interface Props {
   readonly coords: readonly Coord[];
+  /** Surface class of the stretch starting at each vertex (lib/surface.ts). */
+  readonly surfaceAt: Uint8Array;
   /** Vertex index where each waypoint after the start sits. */
   readonly stops: readonly number[];
   readonly letters: readonly string[];
@@ -25,7 +28,7 @@ function niceStep(span: number, target: number): number {
   return [1, 2, 5, 10].map((m) => m * p).find((s) => s >= raw) ?? 10 * p;
 }
 
-export function ElevationProfile({ coords, stops, letters, onHover }: Props): JSX.Element {
+export function ElevationProfile({ coords, surfaceAt, stops, letters, onHover }: Props): JSX.Element {
   const box = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(800);
   const [hoverI, setHoverI] = useState<number | null>(null);
@@ -71,6 +74,19 @@ export function ElevationProfile({ coords, stops, letters, onHover }: Props): JS
     return { line, area: `${line}L${x(total).toFixed(1)},${H - PAD.b}L${PAD.l},${H - PAD.b}Z` };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [coords, dist, W, zMin, zMax]);
+
+  // Surface strip along the x axis: one rect per run of equal surface.
+  const strip = useMemo(() => {
+    const out: Array<{ x0: number; x1: number; color: string }> = [];
+    let start = 0;
+    for (let i = 1; i <= coords.length - 1; i++) {
+      if (i < coords.length - 1 && surfaceAt[i] === surfaceAt[start]) continue;
+      out.push({ x0: x(dist[start]), x1: x(dist[i]), color: SURFACE_INFO[surfaceOfClass(surfaceAt[start])].color });
+      start = i;
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [coords, surfaceAt, dist, W]);
 
   const zStep = niceStep(zMax - zMin, 3);
   const zTicks: number[] = [];
@@ -133,6 +149,9 @@ export function ElevationProfile({ coords, stops, letters, onHover }: Props): JS
             <text key={`k${k}`} x={x(k * 1000)} y={H - 6} className="tick" textAnchor="middle">{k} km</text>
           ))}
           <path d={path.area} className="area" />
+          {strip.map((s, i) => (
+            <rect key={`sf${i}`} x={s.x0} y={H - PAD.b + 1} width={Math.max(0.5, s.x1 - s.x0)} height={4} fill={s.color} />
+          ))}
           <path d={path.line} className="line" />
           {stops.map((s, i) => (
             <g key={`s${i}`}>

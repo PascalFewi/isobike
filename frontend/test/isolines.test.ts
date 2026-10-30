@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { GRID_NONE, type EffortGrid } from '../src/lib/effortResponse.ts';
-import { contourSegments, gridCorners, isolines, smoothField } from '../src/lib/isolines.ts';
+import { contourLines, contourSegments, gridCorners, isolines, smoothField } from '../src/lib/isolines.ts';
 
 /** A cone of reach around the centre: minutes = 10 * distance in cells. */
 function cone(n: number, holes: Array<[number, number]> = []): EffortGrid {
@@ -43,6 +43,16 @@ describe('contours', () => {
       expect(r).toBeGreaterThan(2.5);
       expect(r).toBeLessThan(5.5);
     }
+  });
+
+  it('joins the segments of a ring into one closed line', () => {
+    const g = cone(15);
+    const field = smoothField(g, 0, 1);
+    const lines = contourLines(field, g.nx, g.ny, 40);
+    expect(lines).toHaveLength(1);
+    const pts = lines[0];
+    expect(pts.length / 2 - 1).toBe(contourSegments(field, g.nx, g.ny, 40).length / 4);
+    expect(pts.slice(-2)).toEqual(pts.slice(0, 2));
   });
 
   it('emits one feature per band edge up to the budget, the last flagged', () => {

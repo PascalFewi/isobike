@@ -1,275 +1,220 @@
 /**
- * MapLibre style + data-driven expressions for the reach map and the route.
+ * Our map layers on top of a vector basemap.
  *
- * Two display levels, because what reads well changes with scale:
+ * The basemap is a ready-made MapLibre style ({@link BASEMAP_STYLE_URL}:
+ * OpenFreeMap's light-grey Positron for now, a self-hosted Protomaps file later)
+ * -- one fast vector map for all of Europe instead of country raster maps. Our
+ * layers go in two places in it:
  *
- *   zoom <= 11   isolines at the band edges over a soft area fill, both drawn
- *                from the Worker's 500 m min-time grid (see isolines.ts). A
- *                surface reads cleanly from country down to region scale; per-
- *                road colouring at these zooms looked dotted, because the low-
- *                zoom tiles carry only part of the roads and short edges render
- *                as blobs
- *   zoom >= 11   lines by road class: main roads bold, tracks and paths fine,
- *                with a light casing -- here the tiles are complete and the
- *                single road matters
+ *   below its labels   reach area, road types, isolines -- so place names stay
+ *                      readable on top of the colours
+ *   on top             the route, the POIs, the elevation hover point
  *
- * The road layers are a join: the Worker's `(edge_id -> time)` field is pushed
- * onto the PMTiles line features via `setFeatureState` (the source uses
- * `promoteId` so `edge_id` becomes the feature id), and the paint expressions
- * read `feature-state.time`. That time is in *Worker* seconds including the
- * route-leg offset; the rider's speed factor and the budget only change these
- * expressions (a cheap `setPaintProperty`), never the state, never a Worker call.
+ * Reach is drawn from the Worker's min-time grids (see isolines.ts): isolines
+ * at the band edges over a soft area fill, one pair of layers per detail level.
+ *
+ * Road types come from our own network tiles (`network.pmtiles`, build/export.py:
+ * `highway` and `surface` per road) with a fixed style: is it a cycle path, a
+ * quiet paved road, a main road with traffic, gravel, or an MTB path. A fixed
+ * style is drawn straight from the tile data, so it costs nothing per request.
  */
 
 import type {
   ExpressionSpecification,
+  FilterSpecification,
+  LayerSpecification,
   LineLayerSpecification,
-  StyleSpecification,
+  RasterLayerSpecification,
+  SourceSpecification,
+  SymbolLayerSpecification,
 } from 'maplibre-gl';
 
-import { BAND_COLORS, N_BANDS, bandStepS } from './colorScale.ts';
-import { PMTILES_URL, TILE_LAYER } from '../config.ts';
+import { ISO_LEVELS } from './isolines.ts';
+import { POI_IMAGE_PREFIX, POI_INFO, POI_KINDS } from './pois.ts';
+import { NETWORK_TILE_LAYER, NETWORK_URL, POIS_URL, POI_TILE_LAYER } from '../config.ts';
 
-export const EFFORT_SOURCE = 'network';
-export const ISO_FILL_SOURCE = 'iso-fill';
-export const ISO_LINE_SOURCE = 'iso-lines';
+export const NETWORK_SOURCE = 'network';
 export const ROUTE_SOURCE = 'route';
 export const HOVER_SOURCE = 'hover';
+export const POI_SOURCE = 'pois';
 
-export const ISO_FILL_LAYER = 'iso-fill';
-export const ISO_LINE_LAYER = 'iso-lines';
-export const CASING_LAYER = 'effort-casing';
-export const LINE_LAYER = 'effort-line';
 export const ROUTE_CASING_LAYER = 'route-casing';
 export const ROUTE_LAYER = 'route-line';
 export const HOVER_LAYER = 'hover-point';
+export const POI_LAYER = 'pois';
 
-/** Zoom where the isolines hand over to the road lines (cross-fade +-0.5). */
-export const ISO_MAX_ZOOM = 11;
-/** Zoom where the road lines are fully in. */
-export const CLASS_ZOOM = ISO_MAX_ZOOM;
-/** Below this zoom the road layers are invisible, so no feature-state is needed. */
-export const STAMP_MIN_ZOOM = ISO_MAX_ZOOM - 1;
+/** Source (and layer) ids of an isoline level's area fill and lines. */
+export const isoFillSource = (level: number): string => `iso-fill-${level}`;
+export const isoLineSource = (level: number): string => `iso-lines-${level}`;
 
-const TRANSPARENT = 'rgba(0,0,0,0)';
+const OSM_ATTRIBUTION =
+  '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>-Mitwirkende';
 
-/** Road class from the tile's `highway` property: 0 main, 1 local, 2 track/path/cycleway. */
-const ROAD_CLASS: ExpressionSpecification = [
-  'match',
-  ['get', 'highway'],
-  ['primary', 'primary_link', 'secondary', 'secondary_link', 'tertiary', 'tertiary_link'],
-  0,
-  ['unclassified', 'residential', 'living_street', 'service', 'road'],
-  1,
-  2,
-];
-
-const HAS_TIME = ['!=', ['feature-state', 'time'], null] as unknown as ExpressionSpecification;
-
-/** In budget: set and below the budget in Worker seconds. */
-function inBudget(budgetHours: number, factor: number): ExpressionSpecification {
-  return ['all', HAS_TIME, ['<', ['feature-state', 'time'], budgetHours * 3600 * factor]];
-}
-
-/**
- * `line-color` for the road layers: a step over `feature-state.time`. Band edges
- * are displayed seconds times the speed factor, i.e. compared in Worker seconds
- * (displayed = worker / factor).
- */
-export function effortColorExpression(budgetHours: number, factor: number): ExpressionSpecification {
-  const step: unknown[] = ['step', ['feature-state', 'time'], BAND_COLORS[0]];
-  const width = bandStepS(budgetHours) * factor;
-  for (let k = 1; k < N_BANDS; k++) step.push(k * width, BAND_COLORS[k]);
-  return ['case', HAS_TIME, step, TRANSPARENT] as unknown as ExpressionSpecification;
-}
-
-/** Road lines fade in as the isolines fade out. */
-export function lineOpacityExpression(budgetHours: number, factor: number): ExpressionSpecification {
-  const on: ExpressionSpecification = ['case', inBudget(budgetHours, factor), 1, 0];
-  return [
-    'interpolate', ['linear'], ['zoom'],
-    CLASS_ZOOM - 0.5, 0,
-    CLASS_ZOOM + 0.5, ['*', 0.95, on],
-  ] as unknown as ExpressionSpecification;
-}
-
-export function casingOpacityExpression(budgetHours: number, factor: number): ExpressionSpecification {
-  const on: ExpressionSpecification = ['case', inBudget(budgetHours, factor), 1, 0];
-  return [
-    'interpolate', ['linear'], ['zoom'],
-    CLASS_ZOOM - 0.5, 0,
-    CLASS_ZOOM + 0.5, ['*', 0.85, on],
-  ] as unknown as ExpressionSpecification;
-}
-
-/** `line-width` by road class: a fine line mid-zoom, a road-map hierarchy close in. */
-function classWidth(extra = 0): ExpressionSpecification {
-  const byClass = (main: number, local: number, track: number): ExpressionSpecification =>
-    ['match', ROAD_CLASS, 0, main + extra, 1, local + extra, track + extra] as unknown as ExpressionSpecification;
-  return [
-    'interpolate', ['exponential', 1.6], ['zoom'],
-    11, byClass(2.4, 1.6, 1.0),
-    13, byClass(4, 2.8, 1.6),
-    16, byClass(10, 7, 3.5),
-  ] as unknown as ExpressionSpecification;
-}
-
-function roadLayer(id: string, paint: LineLayerSpecification['paint'], minzoom: number): LineLayerSpecification {
-  return {
-    id,
-    type: 'line',
-    source: EFFORT_SOURCE,
-    'source-layer': TILE_LAYER,
-    minzoom,
-    layout: { 'line-cap': 'round', 'line-join': 'round' },
-    paint: paint ?? {},
-  };
-}
-
-/** The road layers in draw order (casing, line), styled for a budget and speed. */
-export function roadLayers(budgetHours: number, factor: number): LineLayerSpecification[] {
-  return [
-    roadLayer(CASING_LAYER, {
-      'line-color': '#ffffff',
-      'line-width': classWidth(2),
-      'line-opacity': casingOpacityExpression(budgetHours, factor),
-    }, CLASS_ZOOM - 0.5),
-    roadLayer(LINE_LAYER, {
-      'line-color': effortColorExpression(budgetHours, factor),
-      'line-width': classWidth(),
-      'line-opacity': lineOpacityExpression(budgetHours, factor),
-    }, CLASS_ZOOM - 0.5),
-  ];
-}
-
-/** Restyle the road layers in place for a new budget / speed -- no state change. */
-export function restyleRoads(
-  map: { setPaintProperty(layer: string, prop: string, value: unknown): void },
-  budgetHours: number,
-  factor: number,
-): void {
-  map.setPaintProperty(CASING_LAYER, 'line-opacity', casingOpacityExpression(budgetHours, factor));
-  map.setPaintProperty(LINE_LAYER, 'line-color', effortColorExpression(budgetHours, factor));
-  map.setPaintProperty(LINE_LAYER, 'line-opacity', lineOpacityExpression(budgetHours, factor));
-}
-
-const SWISSTOPO = '© <a href="https://www.swisstopo.admin.ch" target="_blank" rel="noreferrer">swisstopo</a>';
-
-/**
- * The selectable backgrounds. All are raster tiles in Web Mercator, free and
- * keyless; each is its own source + layer, and only the visible one loads tiles.
- *
- * - grau: swisstopo grey national map -- greyscale, so the reach colours
- *   dominate, with relief and topographic detail for orientation. CH only.
- * - satellit: swisstopo SWISSIMAGE aerial imagery, 10 cm - 2 m. CH only.
- * - osm: the OpenStreetMap standard map, worldwide. Served by the OSM
- *   Foundation's volunteer-run tile servers, whose usage policy allows light
- *   use with attribution; heavy traffic would need a commercial tile provider.
- */
-export const BASEMAPS = {
-  grau: {
-    label: 'Grau',
-    tiles: ['https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-grau/default/current/3857/{z}/{x}/{y}.jpeg'],
-    maxzoom: 19,
-    attribution: SWISSTOPO,
-  },
-  satellit: {
-    label: 'Satellit',
-    tiles: ['https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.swissimage/default/current/3857/{z}/{x}/{y}.jpeg'],
-    maxzoom: 20,
-    attribution: SWISSTOPO,
-  },
-  osm: {
-    label: 'OSM',
-    tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-    maxzoom: 19,
-    attribution: '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>-Mitwirkende',
-  },
-} as const;
-
-export type BasemapKey = keyof typeof BASEMAPS;
-export const DEFAULT_BASEMAP: BasemapKey = 'grau';
-
-const basemapLayerId = (key: BasemapKey): string => `basemap-${key}`;
-
-/** Show one background, hide the others (hidden raster layers fetch nothing). */
-export function setBasemap(
-  map: { setLayoutProperty(layer: string, prop: string, value: unknown): void },
-  key: BasemapKey,
-): void {
-  for (const k of Object.keys(BASEMAPS) as BasemapKey[]) {
-    map.setLayoutProperty(basemapLayerId(k), 'visibility', k === key ? 'visible' : 'none');
-  }
-}
-
-/** A 1x1 transparent PNG: the iso fill's placeholder before the first field. */
+/** A 1x1 transparent PNG: an iso fill's placeholder while there is no field. */
 export const EMPTY_PNG =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 const EMPTY_FC = { type: 'FeatureCollection' as const, features: [] };
 
-/** Base style: the backgrounds, the network source, and the empty overlay sources. */
-export function buildStyle(basemap: BasemapKey = DEFAULT_BASEMAP): StyleSpecification {
-  const keys = Object.keys(BASEMAPS) as BasemapKey[];
+// --------------------------------------------------------------------------- //
+// Road types
+// --------------------------------------------------------------------------- //
+
+export const ROAD_KINDS = ['cycleway', 'road', 'main', 'gravel', 'path'] as const;
+export type RoadKind = (typeof ROAD_KINDS)[number];
+
+interface RoadKindInfo {
+  readonly label: string;
+  readonly color: string;
+  /** Line width at zoom 14, px; scaled with zoom. */
+  readonly width: number;
+  readonly dash: 'solid' | 'dashed' | 'dotted';
+}
+
+/**
+ * Zoom the road types appear at, all together, fading in over half a level. The
+ * network tiles hold every road only from here (their last zoom, build -zg);
+ * below it tippecanoe has thinned them to a fraction, which drew as fragments.
+ */
+export const ROAD_MINZOOM = 11;
+
+/** What a rider wants to know of a road: can a road bike go here, and is there traffic? */
+export const ROAD_INFO: Readonly<Record<RoadKind, RoadKindInfo>> = {
+  cycleway: { label: 'Veloweg', color: '#2e7d32', width: 2.6, dash: 'solid' },
+  road: { label: 'Nebenstrasse, asphaltiert', color: '#546e7a', width: 1.8, dash: 'solid' },
+  main: { label: 'Hauptstrasse (Verkehr)', color: '#c62828', width: 3.2, dash: 'solid' },
+  gravel: { label: 'Schotter / Feldweg', color: '#8d6e63', width: 2.2, dash: 'dashed' },
+  path: { label: 'Naturweg / Pfad (MTB)', color: '#5d4037', width: 1.8, dash: 'dotted' },
+};
+
+const MAIN_ROADS = ['primary', 'primary_link', 'secondary', 'secondary_link'];
+const TRAILS = ['path', 'bridleway', 'footway'];
+
+/**
+ * A network feature's road kind from its `highway` and `surface`. The surface
+ * decides first -- a gravel main road is gravel to a road bike -- then the class;
+ * a track or path without a surface tag counts as what it usually is.
+ */
+export const ROAD_KIND: ExpressionSpecification = [
+  'case',
+  ['==', ['get', 'surface'], 'unpaved'], 'path',
+  ['==', ['get', 'surface'], 'gravel'], 'gravel',
+  ['==', ['get', 'highway'], 'cycleway'], 'cycleway',
+  ['in', ['get', 'highway'], ['literal', MAIN_ROADS]], 'main',
+  ['all', ['==', ['get', 'surface'], 'unknown'], ['==', ['get', 'highway'], 'track']], 'gravel',
+  ['all', ['==', ['get', 'surface'], 'unknown'], ['in', ['get', 'highway'], ['literal', TRAILS]]], 'path',
+  'road',
+];
+
+function byRoadKind(value: (k: RoadKind) => number | string): ExpressionSpecification {
+  const m: unknown[] = ['match', ROAD_KIND];
+  for (const k of ROAD_KINDS) m.push(k, value(k));
+  m.push(value('road'));
+  return m as ExpressionSpecification;
+}
+
+const DASH: Record<RoadKindInfo['dash'], number[] | undefined> = {
+  solid: undefined,
+  dashed: [2.5, 1.5],
+  dotted: [0.1, 1.8],
+};
+
+/** Road-type layers, one per dash style (MapLibre cannot vary the dash per feature). */
+export function roadLayers(): LineLayerSpecification[] {
+  return (['solid', 'dashed', 'dotted'] as const).map((dash) => {
+    const kinds = ROAD_KINDS.filter((k) => ROAD_INFO[k].dash === dash);
+    const filter = ['in', ROAD_KIND, ['literal', kinds]] as FilterSpecification;
+    const width = (scale: number): ExpressionSpecification => byRoadKind((k) => ROAD_INFO[k].width * scale);
+    return {
+      id: `roads-${dash}`,
+      type: 'line',
+      source: NETWORK_SOURCE,
+      'source-layer': NETWORK_TILE_LAYER,
+      minzoom: ROAD_MINZOOM,
+      filter,
+      layout: {
+        'line-cap': dash === 'dotted' ? 'round' : 'butt',
+        'line-join': 'round',
+        // Main roads over quiet ones where they meet.
+        'line-sort-key': byRoadKind((k) => (k === 'main' ? 2 : k === 'cycleway' ? 1 : 0)),
+      },
+      paint: {
+        'line-color': byRoadKind((k) => ROAD_INFO[k].color),
+        'line-width': ['interpolate', ['exponential', 1.5], ['zoom'], ROAD_MINZOOM, width(0.55), 14, width(1), 17, width(2.2)],
+        'line-opacity': ['interpolate', ['linear'], ['zoom'], ROAD_MINZOOM, 0, ROAD_MINZOOM + 0.5, 0.9],
+        ...(DASH[dash] !== undefined ? { 'line-dasharray': DASH[dash] } : {}),
+      },
+    } satisfies LineLayerSpecification;
+  });
+}
+
+export const ROAD_LAYER_IDS = roadLayers().map((l) => l.id);
+
+// --------------------------------------------------------------------------- //
+// Sources and layers
+// --------------------------------------------------------------------------- //
+
+/** Our sources, added to the basemap style once it has loaded. */
+export function overlaySources(): Record<string, SourceSpecification> {
   return {
-    version: 8,
-    glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
-    sources: {
-      ...Object.fromEntries(
-        keys.map((k) => [
-          basemapLayerId(k),
-          { type: 'raster', tiles: [...BASEMAPS[k].tiles], tileSize: 256, maxzoom: BASEMAPS[k].maxzoom, attribution: BASEMAPS[k].attribution },
-        ]),
-      ),
-      [EFFORT_SOURCE]: {
-        type: 'vector',
-        url: `pmtiles://${PMTILES_URL}`,
-        // edge_id becomes the feature id so setFeatureState can target it.
-        promoteId: { [TILE_LAYER]: 'edge_id' },
-        // The network is derived from OpenStreetMap (ODbL): attribution required.
-        attribution: '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>-Mitwirkende',
-      },
-      [ISO_FILL_SOURCE]: {
-        type: 'image',
-        url: EMPTY_PNG,
-        coordinates: [[5.9, 47.9], [10.6, 47.9], [10.6, 45.7], [5.9, 45.7]],
-      },
-      [ISO_LINE_SOURCE]: { type: 'geojson', data: EMPTY_FC },
-      [ROUTE_SOURCE]: { type: 'geojson', data: EMPTY_FC },
-      [HOVER_SOURCE]: { type: 'geojson', data: EMPTY_FC },
-    },
-    layers: [
-      { id: 'bg', type: 'background', paint: { 'background-color': '#eef1f4' } },
-      ...keys.map((k) => ({
-        id: basemapLayerId(k),
-        type: 'raster' as const,
-        source: basemapLayerId(k),
-        layout: { visibility: k === basemap ? ('visible' as const) : ('none' as const) },
-      })),
-      {
-        id: ISO_FILL_LAYER,
-        type: 'raster',
-        source: ISO_FILL_SOURCE,
-        maxzoom: ISO_MAX_ZOOM + 0.5,
-        paint: {
-          'raster-opacity': ['interpolate', ['linear'], ['zoom'], 6, 0.42, ISO_MAX_ZOOM - 0.5, 0.32, ISO_MAX_ZOOM + 0.5, 0],
-          'raster-resampling': 'linear',
-          'raster-fade-duration': 0,
-        },
-      },
-      {
-        id: ISO_LINE_LAYER,
-        type: 'line',
-        source: ISO_LINE_SOURCE,
-        maxzoom: ISO_MAX_ZOOM + 0.5,
-        layout: { 'line-cap': 'round', 'line-join': 'round' },
-        paint: {
-          'line-color': ['get', 'color'],
-          'line-width': ['case', ['==', ['get', 'last'], true], 2.8, 1.6],
-          'line-opacity': ['interpolate', ['linear'], ['zoom'], ISO_MAX_ZOOM - 0.5, 0.95, ISO_MAX_ZOOM + 0.5, 0],
-        },
-      },
-    ],
+    [NETWORK_SOURCE]: { type: 'vector', url: `pmtiles://${NETWORK_URL}`, attribution: OSM_ATTRIBUTION },
+    [POI_SOURCE]: { type: 'vector', url: `pmtiles://${POIS_URL}`, attribution: OSM_ATTRIBUTION },
+    ...Object.fromEntries(
+      ISO_LEVELS.flatMap((_, i) => [
+        [isoFillSource(i), { type: 'image', url: EMPTY_PNG, coordinates: [[5.9, 47.9], [10.6, 47.9], [10.6, 45.7], [5.9, 45.7]] }],
+        [isoLineSource(i), { type: 'geojson', data: EMPTY_FC }],
+      ]),
+    ),
+    [ROUTE_SOURCE]: { type: 'geojson', data: EMPTY_FC },
+    [HOVER_SOURCE]: { type: 'geojson', data: EMPTY_FC },
   };
+}
+
+/** Layers that go below the basemap's labels: reach area, road types, isolines. */
+export function underLabelLayers(): LayerSpecification[] {
+  const levels = ISO_LEVELS.map((level, i) => ({ ...level, i }));
+  return [
+    ...levels.map(({ i, minzoom, maxzoom }): RasterLayerSpecification => ({
+      id: isoFillSource(i),
+      type: 'raster',
+      source: isoFillSource(i),
+      minzoom,
+      maxzoom,
+      paint: {
+        // Lighter close in, where the roads and the background matter more.
+        'raster-opacity': ['interpolate', ['linear'], ['zoom'], 6, 0.42, 12, 0.28],
+        'raster-resampling': 'linear',
+        'raster-fade-duration': 0,
+      },
+    })),
+    ...roadLayers(),
+    ...levels.map(({ i, minzoom, maxzoom }): LineLayerSpecification => ({
+      id: isoLineSource(i),
+      type: 'line',
+      source: isoLineSource(i),
+      minzoom,
+      maxzoom,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: {
+        'line-color': ['get', 'color'],
+        'line-width': ['case', ['==', ['get', 'last'], true], 2.8, 1.6],
+        'line-opacity': 0.95,
+      },
+    })),
+  ];
+}
+
+/** Layers on top of everything: route, POIs, hover point. */
+export function topLayers(): LayerSpecification[] {
+  return [
+    ...routeLayers(),
+    poiLayer(),
+    {
+      id: HOVER_LAYER,
+      type: 'circle',
+      source: HOVER_SOURCE,
+      paint: { 'circle-radius': 6, 'circle-color': '#11161d', 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2.5 },
+    },
+  ];
 }
 
 /** Route on top of everything: a white casing and a dark core (outside the palette). */
@@ -290,4 +235,39 @@ export function routeLayers(): LineLayerSpecification[] {
       paint: { 'line-color': '#11161d', 'line-width': ['interpolate', ['linear'], ['zoom'], 7, 2.5, 14, 4.5] },
     },
   ];
+}
+
+/** `match` over the POI kind: one value per kind, in {@link POI_KINDS} order. */
+function byKind(value: (kind: (typeof POI_KINDS)[number], i: number) => number | string): ExpressionSpecification {
+  const m: unknown[] = ['match', ['get', 'kind']];
+  POI_KINDS.forEach((k, i) => m.push(k, value(k, i)));
+  m.push(value(POI_KINDS[0], 0));
+  return m as ExpressionSpecification;
+}
+
+/**
+ * Cycling POIs as icons (images from pois.ts, added by MapView). Each kind from
+ * its own zoom; where icons collide, the earlier kind in {@link POI_KINDS} wins,
+ * so water and repair outrank the many parking spots.
+ */
+export function poiLayer(): SymbolLayerSpecification {
+  return {
+    id: POI_LAYER,
+    type: 'symbol',
+    source: POI_SOURCE,
+    'source-layer': POI_TILE_LAYER,
+    minzoom: Math.min(...POI_KINDS.map((k) => POI_INFO[k].minzoom)),
+    filter: ['>=', ['zoom'], byKind((k) => POI_INFO[k].minzoom)],
+    layout: {
+      'icon-image': ['concat', POI_IMAGE_PREFIX, ['get', 'kind']],
+      'icon-size': ['interpolate', ['linear'], ['zoom'], 12, 0.75, 16, 1],
+      'icon-padding': 1,
+      'symbol-sort-key': byKind((_, i) => i),
+    },
+  };
+}
+
+/** The first label layer of a basemap style: our under-label layers go before it. */
+export function firstLabelLayer(layers: readonly { id: string; type: string }[]): string | undefined {
+  return layers.find((l) => l.type === 'symbol')?.id;
 }

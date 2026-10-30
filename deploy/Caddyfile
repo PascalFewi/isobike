@@ -21,7 +21,7 @@ isobike.ch, www.isobike.ch {
 
 	# Only the files the browser needs are public; graph.bin and geometry.bin
 	# stay private to the API (they are 100-200 MB each).
-	@public_data path /data/network.pmtiles /data/meta.json
+	@public_data path /data/network.pmtiles /data/pois.pmtiles /data/meta.json
 	handle @public_data {
 		uri strip_prefix /data
 		root * /opt/isobike/data

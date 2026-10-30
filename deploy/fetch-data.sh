@@ -7,14 +7,14 @@
 #   sudo bash /opt/isobike/bin/fetch-data.sh
 #
 # Files expected (see deploy/README.md "Data"): graph.bin, geometry.bin, network.pmtiles,
-# meta.json. Downloaded into a temp dir first and moved into place only when all
-# four are there, so a failed download never leaves a half-updated data set.
+# pois.pmtiles, meta.json. Downloaded into a temp dir first and moved into place only
+# when all five are there, so a failed download never leaves a half-updated data set.
 
 set -euo pipefail
 
 DRIVE_FOLDER_URL="${DRIVE_FOLDER_URL:-https://drive.google.com/drive/folders/1L97boYC-ZaGXpImwEYwdY6MKjwFfNcEx}"
 DATA_DIR="${1:-/opt/isobike/data}"
-FILES=(graph.bin geometry.bin network.pmtiles meta.json)
+FILES=(graph.bin geometry.bin network.pmtiles pois.pmtiles meta.json)
 
 command -v gdown >/dev/null || { echo "gdown missing: pipx install gdown" >&2; exit 1; }
 
@@ -22,7 +22,7 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 echo "== downloading $DRIVE_FOLDER_URL"
-# No --remaining-ok: newer gdown dropped it, and the folder holds four files.
+# No --remaining-ok: newer gdown dropped it, and the folder holds five files.
 gdown --folder -O "$tmp" "$DRIVE_FOLDER_URL"
 
 for f in "${FILES[@]}"; do

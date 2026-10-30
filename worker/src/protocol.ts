@@ -167,12 +167,28 @@ export interface EffortFieldRequest {
   readonly maxSlopePct: number | undefined;
   readonly allowedSurfaces: ReadonlySet<number> | undefined;
   readonly maxCost: number;
-  /** Cell size of the optional min-time grid (for isolines), km; undefined = no grid. */
-  readonly gridKm: number | undefined;
+  /** Cell sizes of the min-time grids (for isolines), km, in request order; empty = none. */
+  readonly gridKm: readonly number[];
+  /** Whether to send the per-edge arrays; false sends the grids alone. */
+  readonly edges: boolean;
 }
 
 /** Smallest grid cell accepted: finer than ~250 m only costs bytes. */
 export const MIN_GRID_KM = 0.25;
+/** Most grids one request may ask for. */
+export const MAX_GRIDS = 4;
+
+/** `grid_km`: one cell size or a list of them. */
+function resolveGridKm(value: unknown): number[] {
+  if (value === undefined || value === null) return [];
+  const list = Array.isArray(value) ? value : [value];
+  if (list.length > MAX_GRIDS) throw new ApiError(`grid_km takes at most ${MAX_GRIDS} sizes`);
+  return list.map((v) => {
+    const km = requireFiniteNumber(v, 'grid_km');
+    if (km < MIN_GRID_KM) throw new ApiError(`grid_km must be >= ${MIN_GRID_KM}`);
+    return km;
+  });
+}
 
 export function parseEffortFieldBody(raw: unknown): EffortFieldRequest {
   const body = asObject(raw);
@@ -180,8 +196,8 @@ export function parseEffortFieldBody(raw: unknown): EffortFieldRequest {
   const model = resolveCostModel(body);
   const maxCost = optionalFiniteNumber(body.max_cost, 'max_cost');
   if (maxCost !== undefined && maxCost <= 0) throw new ApiError('max_cost must be positive (seconds)');
-  const gridKm = optionalFiniteNumber(body.grid_km, 'grid_km');
-  if (gridKm !== undefined && gridKm < MIN_GRID_KM) throw new ApiError(`grid_km must be >= ${MIN_GRID_KM}`);
+  const gridKm = resolveGridKm(body.grid_km);
+  if (body.edges !== undefined && typeof body.edges !== 'boolean') throw new ApiError('edges must be true or false');
   return {
     lat,
     lon,
@@ -190,6 +206,7 @@ export function parseEffortFieldBody(raw: unknown): EffortFieldRequest {
     allowedSurfaces: resolveSurfaces(body),
     maxCost: maxCost ?? DEFAULT_BUDGET_S,
     gridKm,
+    edges: body.edges !== false,
   };
 }
 
@@ -238,7 +255,7 @@ export function parseSnapQuery(url: URL): { lat: number; lon: number } {
 //     0    4  char[4]  magic "VEFF"
 //     4    2  u16      format_version (== 2)
 //     6    2  u16      header_size (== 32)
-//     8    4  u32      count            (number of edges in the field)
+//     8    4  u32      count            (number of edges sent; 0 when the request said edges: false)
 //    12    4  u32      snapped_node
 //    16    4  f32      snapped_lat      (so the client can place the start marker)
 //    20    4  f32      snapped_lon
@@ -248,11 +265,12 @@ export function parseSnapQuery(url: URL): { lat: number; lon: number } {
 //  32+4N 4*N  f32[N]   time
 //  32+8N 4*N  f32[N]   cum_ascent
 //
-// Optional grid trailer (v2, only when the request asked for `grid_km`): the
-// minimum reach time per map cell, from which the client draws isolines at low
-// zoom without touching a single tile feature.
+// Zero or more grid trailers (v2), one per `grid_km` size, in request order,
+// back to back: the minimum reach time per map cell, from which the client draws
+// isolines and the reach area. Each covers only the reached cells' bounding box.
+// A response with one trailer reads the same as before multi-grid requests.
 //
-//  32+12N  4  char[4]  magic "VGRD"
+//     +0   4  char[4]  magic "VGRD"
 //          4  u32      nx               (columns, west -> east)
 //          4  u32      ny               (rows, north -> south)
 //          4  f32      west_lon         (west edge of column 0)
@@ -287,9 +305,11 @@ const KM_PER_DEG_LAT = 110.54;
 const KM_PER_DEG_LON_EQ = 111.32;
 
 /**
- * Minimum reach time per `cellKm` cell over the graph's bbox. Each half-edge
- * counts at its midpoint with its geometric edge's field time; O(E), ~20 ms
- * nationwide.
+ * Minimum reach time per `cellKm` cell, cropped to the reached cells. Each
+ * half-edge counts at its midpoint with its geometric edge's field time; O(E),
+ * 35-100 ms nationwide. Cells sit on one lattice over the graph's bbox, so grids
+ * of one size line up whatever the start. Nothing reached gives a single empty
+ * cell at the bbox's north-west corner.
  */
 export function effortGrid(graph: Graph, field: EffortField, cellKm: number): EffortGrid {
   const [minLon, minLat, maxLon, maxLat] = graph.bbox;
@@ -299,6 +319,11 @@ export function effortGrid(graph: Graph, field: EffortField, cellKm: number): Ef
   const nx = Math.max(1, Math.ceil((maxLon - minLon) / cellLonDeg));
   const ny = Math.max(1, Math.ceil((maxLat - minLat) / cellLatDeg));
   const minutes = new Uint16Array(nx * ny).fill(GRID_NONE);
+  // Bounding box of the reached cells, for the crop.
+  let x0 = nx;
+  let x1 = -1;
+  let y0 = ny;
+  let y1 = -1;
   for (let u = 0; u < graph.nodeCount; u++) {
     const end = graph.csrOffset[u + 1];
     for (let e = graph.csrOffset[u]; e < end; e++) {
@@ -312,13 +337,33 @@ export function effortGrid(graph: Graph, field: EffortField, cellKm: number): Ef
       const m = Math.min(GRID_NONE - 1, Math.round(t / 60));
       const i = cy * nx + cx;
       if (m < minutes[i]) minutes[i] = m;
+      if (cx < x0) x0 = cx;
+      if (cx > x1) x1 = cx;
+      if (cy < y0) y0 = cy;
+      if (cy > y1) y1 = cy;
     }
   }
-  return { nx, ny, westLon: minLon, northLat: maxLat, cellLonDeg, cellLatDeg, minutes };
+  if (x1 < 0) {
+    return { nx: 1, ny: 1, westLon: minLon, northLat: maxLat, cellLonDeg, cellLatDeg, minutes: new Uint16Array([GRID_NONE]) };
+  }
+  const w = x1 - x0 + 1;
+  const h = y1 - y0 + 1;
+  const cropped = new Uint16Array(w * h);
+  for (let y = 0; y < h; y++) cropped.set(minutes.subarray((y0 + y) * nx + x0, (y0 + y) * nx + x0 + w), y * w);
+  return {
+    nx: w,
+    ny: h,
+    westLon: minLon + x0 * cellLonDeg,
+    northLat: maxLat - y0 * cellLatDeg,
+    cellLonDeg,
+    cellLatDeg,
+    minutes: cropped,
+  };
 }
 
 export interface EffortFieldResponse {
-  readonly grid: EffortGrid | null;
+  /** The grid trailers, in request order. */
+  readonly grids: readonly EffortGrid[];
   readonly count: number;
   readonly snappedNode: number;
   readonly snappedLat: number;
@@ -333,16 +378,19 @@ export interface EffortFieldResponse {
 /**
  * Serialise a computed effort field. Emits edges in ascending edge_id order,
  * which is deterministic and lets the client binary-search if it ever wants to.
+ * With `edges: false` only the header and the grids go out -- the per-edge
+ * arrays are 12 bytes an edge, megabytes for a long budget.
  */
 export function serializeEffortField(
   graph: Graph,
   snappedNode: number,
   field: EffortField,
-  grid: EffortGrid | null = null,
+  grids: readonly EffortGrid[] = [],
+  { edges = true }: { readonly edges?: boolean } = {},
 ): ArrayBuffer {
-  const count = field.count;
+  const count = edges ? field.count : 0;
   const body = EFFORT_HEADER_SIZE + 12 * count;
-  const trailer = grid === null ? 0 : GRID_HEADER_SIZE + 2 * grid.nx * grid.ny;
+  const trailer = grids.reduce((s, g) => s + GRID_HEADER_SIZE + 2 * g.nx * g.ny, 0);
   const buffer = new ArrayBuffer(body + trailer);
   const view = new DataView(buffer);
   const bytes = new Uint8Array(buffer);
@@ -365,28 +413,33 @@ export function serializeEffortField(
   for (let id = 0; id < field.time.length; id++) {
     const t = field.time[id];
     if (!Number.isFinite(t)) continue;
-    ids[w] = id;
-    times[w] = t;
-    cum[w] = field.cumAscent[id];
+    if (edges) {
+      ids[w] = id;
+      times[w] = t;
+      cum[w] = field.cumAscent[id];
+    }
     if (t > maxTime) maxTime = t;
     if (field.cumAscent[id] > maxCum) maxCum = field.cumAscent[id];
     w++;
   }
   // `count` came from field.count; the write cursor must land on exactly it.
-  if (w !== count) throw new Error(`effort field count mismatch: wrote ${w}, expected ${count}`);
+  if (w !== field.count) throw new Error(`effort field count mismatch: wrote ${w}, expected ${field.count}`);
 
   view.setFloat32(24, maxTime, true);
   view.setFloat32(28, maxCum, true);
 
-  if (grid !== null) {
-    for (let i = 0; i < 4; i++) bytes[body + i] = GRID_MAGIC.charCodeAt(i);
-    view.setUint32(body + 4, grid.nx, true);
-    view.setUint32(body + 8, grid.ny, true);
-    view.setFloat32(body + 12, grid.westLon, true);
-    view.setFloat32(body + 16, grid.northLat, true);
-    view.setFloat32(body + 20, grid.cellLonDeg, true);
-    view.setFloat32(body + 24, grid.cellLatDeg, true);
-    new Uint16Array(buffer, body + GRID_HEADER_SIZE, grid.nx * grid.ny).set(grid.minutes);
+  let at = body;
+  for (const grid of grids) {
+    for (let i = 0; i < 4; i++) bytes[at + i] = GRID_MAGIC.charCodeAt(i);
+    view.setUint32(at + 4, grid.nx, true);
+    view.setUint32(at + 8, grid.ny, true);
+    view.setFloat32(at + 12, grid.westLon, true);
+    view.setFloat32(at + 16, grid.northLat, true);
+    view.setFloat32(at + 20, grid.cellLonDeg, true);
+    view.setFloat32(at + 24, grid.cellLatDeg, true);
+    // Every section before is a whole number of u16s, so this stays 2-aligned.
+    new Uint16Array(buffer, at + GRID_HEADER_SIZE, grid.nx * grid.ny).set(grid.minutes);
+    at += GRID_HEADER_SIZE + 2 * grid.nx * grid.ny;
   }
   return buffer;
 }
@@ -405,30 +458,31 @@ export function parseEffortFieldResponse(buffer: ArrayBuffer): EffortFieldRespon
 
   const count = view.getUint32(8, true);
   const body = EFFORT_HEADER_SIZE + 12 * count;
-  let grid: EffortGrid | null = null;
-  if (buffer.byteLength > body) {
-    let gm = '';
-    for (let i = 0; i < 4; i++) gm += String.fromCharCode(bytes[body + i]);
-    if (gm !== GRID_MAGIC) throw new ApiError('effort-field has trailing bytes without a grid', 500);
-    const nx = view.getUint32(body + 4, true);
-    const ny = view.getUint32(body + 8, true);
-    if (buffer.byteLength !== body + GRID_HEADER_SIZE + 2 * nx * ny) {
-      throw new ApiError('effort-field grid truncated', 500);
-    }
-    grid = {
-      nx,
-      ny,
-      westLon: view.getFloat32(body + 12, true),
-      northLat: view.getFloat32(body + 16, true),
-      cellLonDeg: view.getFloat32(body + 20, true),
-      cellLatDeg: view.getFloat32(body + 24, true),
-      minutes: new Uint16Array(buffer, body + GRID_HEADER_SIZE, nx * ny),
-    };
-  } else if (buffer.byteLength !== body) {
+  if (buffer.byteLength < body) {
     throw new ApiError(`effort-field truncated: ${buffer.byteLength} bytes, expected ${body}`, 500);
   }
+  const grids: EffortGrid[] = [];
+  for (let at = body; at < buffer.byteLength; ) {
+    let gm = '';
+    for (let i = 0; i < 4; i++) gm += String.fromCharCode(bytes[at + i]);
+    if (gm !== GRID_MAGIC) throw new ApiError('effort-field has trailing bytes without a grid', 500);
+    const nx = view.getUint32(at + 4, true);
+    const ny = view.getUint32(at + 8, true);
+    const end = at + GRID_HEADER_SIZE + 2 * nx * ny;
+    if (buffer.byteLength < end) throw new ApiError('effort-field grid truncated', 500);
+    grids.push({
+      nx,
+      ny,
+      westLon: view.getFloat32(at + 12, true),
+      northLat: view.getFloat32(at + 16, true),
+      cellLonDeg: view.getFloat32(at + 20, true),
+      cellLatDeg: view.getFloat32(at + 24, true),
+      minutes: new Uint16Array(buffer, at + GRID_HEADER_SIZE, nx * ny),
+    });
+    at = end;
+  }
   return {
-    grid,
+    grids,
     count,
     snappedNode: view.getUint32(12, true),
     snappedLat: view.getFloat32(16, true),

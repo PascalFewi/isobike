@@ -16,6 +16,8 @@ import {
   idRuns,
   parseGeometryHeader,
   routeGeometry,
+  routeGeometryWithEdges,
+  surfaceRuns,
   type RangeReader,
 } from '../src/geometry.js';
 import { handleRequest } from '../src/handlers.js';
@@ -115,6 +117,34 @@ describe('routeGeometry', () => {
     expect(without.found).toBe(true);
   });
 
+  it('splits the route length by surface and marks each surface run on the line', async () => {
+    const r = route(graph, 287, 306, MODEL)!;
+    expect(r.surfaceM.reduce((a, m) => a + m, 0)).toBeCloseTo(r.distM, 6);
+
+    const header = parseGeometryHeader(GEOM.slice(0, GEOM_HEADER_SIZE));
+    const { coords, edgeStart } = await routeGeometryWithEdges(graph, memoryReader(GEOM), header, r.nodes, r.edgeIds);
+    expect(edgeStart).toEqual(r.edgeIds.map((_, i) => 2 * i));
+    const runs = surfaceRuns(graph, r.edgeIds, edgeStart);
+    expect(runs[0][0]).toBe(0);
+    for (let k = 1; k < runs.length; k++) {
+      expect(runs[k][0]).toBeGreaterThan(runs[k - 1][0]);
+      expect(runs[k][1]).not.toBe(runs[k - 1][1]);
+    }
+    // Every edge's surface is the one of the run it starts in.
+    r.edgeIds.forEach((id, i) => {
+      const run = runs.filter(([v]) => v <= edgeStart[i]).pop()!;
+      expect(run[1]).toBe(graph.edgeSurface[id]);
+    });
+    expect(runs[runs.length - 1][0]).toBeLessThan(coords.length);
+
+    const body = JSON.stringify({ from: [graph.nodeLat[287], graph.nodeLon[287]], to: [graph.nodeLat[306], graph.nodeLon[306]], v_flat: 7.5, vam: 0.19444444444444445 });
+    const res = await handleRequest(graph, new Request('https://worker.test/route', { method: 'POST', headers: { 'content-type': 'application/json' }, body }), { geometry: createGeometrySource(memoryReader(GEOM)) });
+    const json = await res.json() as { surface_m: Record<string, number>; geometry_surface: number[][]; dist_m: number };
+    expect(Object.keys(json.surface_m).sort()).toEqual(['gravel', 'paved', 'unknown', 'unpaved']);
+    expect(Object.values(json.surface_m).reduce((a, m) => a + m, 0)).toBeCloseTo(json.dist_m, -1);
+    expect(json.geometry_surface).toEqual(runs);
+  });
+
   it('degrades to a route without geometry when geometry.bin is missing', async () => {
     const missing = createGeometrySource({ read: () => Promise.reject(new Error('geometry object not found')) });
     const body = JSON.stringify({ from: [graph.nodeLat[287], graph.nodeLon[287]], to: [graph.nodeLat[306], graph.nodeLon[306]], v_flat: 7.5, vam: 0.19444444444444445 });
@@ -142,27 +172,56 @@ describe('effort-field grid', () => {
     expect(Math.max(...reached)).toBeLessThanOrEqual(Math.round(Math.max(...field.time.filter(Number.isFinite)) / 60));
   });
 
-  it('round-trips as a trailer and is absent by default', () => {
+  it('is cropped to the reached cells, on the bbox lattice', () => {
     const grid = effortGrid(graph, field, 0.5);
-    const withGrid = parseEffortFieldResponse(serializeEffortField(graph, 100, field, grid));
-    expect(withGrid.grid).not.toBeNull();
-    expect(withGrid.grid!.nx).toBe(grid.nx);
-    expect(Array.from(withGrid.grid!.minutes)).toEqual(Array.from(grid.minutes));
-    expect(withGrid.count).toBe(field.count);
-    expect(parseEffortFieldResponse(serializeEffortField(graph, 100, field)).grid).toBeNull();
+    const first = (row: (y: number) => boolean, n: number): boolean => Array.from({ length: n }, (_, i) => i).some(row);
+    const reachedRow = (y: number): boolean => first((x) => grid.minutes[y * grid.nx + x] !== GRID_NONE, grid.nx);
+    const reachedCol = (x: number): boolean => first((y) => grid.minutes[y * grid.nx + x] !== GRID_NONE, grid.ny);
+    // Every edge row and column holds a reached cell: nothing left to crop.
+    expect(reachedRow(0) && reachedRow(grid.ny - 1)).toBe(true);
+    expect(reachedCol(0) && reachedCol(grid.nx - 1)).toBe(true);
+    const [minLon, , , maxLat] = graph.bbox;
+    expect(Math.abs((grid.westLon - minLon) / grid.cellLonDeg % 1)).toBeLessThan(1e-6);
+    expect(Math.abs((maxLat - grid.northLat) / grid.cellLatDeg % 1)).toBeLessThan(1e-6);
   });
 
-  it('is returned by /effort-field only when grid_km is set', async () => {
+  it('is a single empty cell when nothing is reached', () => {
+    const none = { ...field, time: new Float64Array(field.time.length).fill(Infinity), count: 0 };
+    const grid = effortGrid(graph, none, 0.5);
+    expect([grid.nx, grid.ny, grid.minutes[0]]).toEqual([1, 1, GRID_NONE]);
+  });
+
+  it('round-trips several trailers in order, with or without the edges', () => {
+    const grids = [effortGrid(graph, field, 1), effortGrid(graph, field, 0.25)];
+    const both = parseEffortFieldResponse(serializeEffortField(graph, 100, field, grids));
+    expect(both.count).toBe(field.count);
+    expect(both.grids.map((g) => g.nx)).toEqual(grids.map((g) => g.nx));
+    expect(both.grids.map((g) => Array.from(g.minutes))).toEqual(grids.map((g) => Array.from(g.minutes)));
+
+    const gridsOnly = parseEffortFieldResponse(serializeEffortField(graph, 100, field, grids, { edges: false }));
+    expect(gridsOnly.count).toBe(0);
+    expect(gridsOnly.maxTime).toBe(both.maxTime);
+    expect(gridsOnly.grids.map((g) => Array.from(g.minutes))).toEqual(grids.map((g) => Array.from(g.minutes)));
+
+    expect(parseEffortFieldResponse(serializeEffortField(graph, 100, field)).grids).toEqual([]);
+  });
+
+  it('is returned by /effort-field for each grid_km, edges only unless edges: false', async () => {
     const mk = (extra: object) => new Request('https://worker.test/effort-field', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ lat: graph.nodeLat[100], lon: graph.nodeLon[100], v_flat: 7.5, vam: 0.19444444444444445, ...extra }),
     });
-    const plain = parseEffortFieldResponse(await (await handleRequest(graph, mk({}))).arrayBuffer());
-    const gridded = parseEffortFieldResponse(await (await handleRequest(graph, mk({ grid_km: 1 }))).arrayBuffer());
-    expect(plain.grid).toBeNull();
-    expect(gridded.grid).not.toBeNull();
-    expect(gridded.count).toBe(plain.count);
-    const bad = await handleRequest(graph, mk({ grid_km: 0.01 }));
-    expect(bad.status).toBe(400);
+    const read = async (extra: object) => parseEffortFieldResponse(await (await handleRequest(graph, mk(extra))).arrayBuffer());
+    const plain = await read({});
+    const one = await read({ grid_km: 1 });
+    const two = await read({ grid_km: [1, 0.5], edges: false });
+    expect(plain.grids).toEqual([]);
+    expect(one.grids).toHaveLength(1);
+    expect(one.count).toBe(plain.count);
+    expect(two.grids.map((g) => g.nx)).toEqual([one.grids[0].nx, effortGrid(graph, field, 0.5).nx]);
+    expect(two.count).toBe(0);
+    for (const bad of [{ grid_km: 0.01 }, { grid_km: [1, 0.01] }, { grid_km: [1, 1, 1, 1, 1] }, { edges: 'no' }]) {
+      expect((await handleRequest(graph, mk(bad))).status, JSON.stringify(bad)).toBe(400);
+    }
   });
 });

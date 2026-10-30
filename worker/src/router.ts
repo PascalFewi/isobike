@@ -36,7 +36,7 @@
  * is a reusable scratch pool keyed by node count -- not a change to any logic here.
  */
 
-import { decodeMaxSlope, slopeExceeds, type Graph } from './binformat.js';
+import { SURFACE_CLASS_COUNT, decodeMaxSlope, slopeExceeds, type Graph } from './binformat.js';
 import { M_PER_DEG_LAT, haversineM, latToM, lonScaleM } from './geo.js';
 import { BinaryHeap } from './heap.js';
 
@@ -108,6 +108,8 @@ export interface RouteResult {
   readonly ascentM: number;
   readonly descentM: number;
   readonly maxSlopePct: number;
+  /** Metres per surface class, indexed by `Surface` (unknown, paved, gravel, unpaved). */
+  readonly surfaceM: number[];
 }
 
 /** `w = a*dist + b*ascent` in f64 -- seconds under the time model. */
@@ -302,11 +304,13 @@ export function buildRoute(
   let ascentM = 0;
   let descentM = 0;
   let maxSlopeU8 = 0;
+  const surfaceM = new Array<number>(SURFACE_CLASS_COUNT).fill(0);
 
   for (const e of edges) {
     nodes.push(graph.edgeTarget[e]);
     edgeIds.push(graph.edgeId[e]);
     distM += graph.edgeDist[e];
+    surfaceM[graph.edgeSurface[graph.edgeId[e]]] += graph.edgeDist[e];
     ascentM += graph.edgeAscent[e];
     descentM += graph.edgeDescent[e];
     if (graph.edgeMaxSlope[e] > maxSlopeU8) maxSlopeU8 = graph.edgeMaxSlope[e];
@@ -320,6 +324,7 @@ export function buildRoute(
     ascentM,
     descentM,
     maxSlopePct: decodeMaxSlope(maxSlopeU8),
+    surfaceM,
   };
 }
 

@@ -1,24 +1,30 @@
 # frontend — VeloRouter map UI (React + Vite + MapLibre, CF Pages)
 
-Click a start → the map colours every road by **time to reach** (viridis bands,
-colour-blind-safe), with a second darker channel for **cumulative ascent**. Click
-again → a route with stats. Two speed sliders replace the old α.
+Click a start → the map shows how far you get in the time budget: isolines at the
+time-band edges over a soft coloured area. Click again → a route with stats, its
+surface (asphalt / gravel / natural path) and an elevation profile. On the map:
+road types (cycle path, quiet road, main road, gravel, MTB path) and cycling POIs
+(water, bike service, food, lodging), both switchable in the map menu.
+
+The basemap is a vector style loaded from `VITE_BASEMAP_STYLE_URL` -- OpenFreeMap's
+Positron by default (Europe-wide, free, no key); our layers are added on top, the
+reach and road types below its labels.
 
 ## Run
 
 ```bash
 npm install
-# point at your Worker + tiles (defaults assume wrangler dev on :8787):
+# point at your Worker + POI tiles (defaults: API on :8787, tiles on :8788):
 echo 'VITE_WORKER_URL=https://velorouter-worker.<you>.workers.dev' > .env.local
-echo 'VITE_PMTILES_URL=https://<r2-public>/network.pmtiles' >> .env.local
+echo 'VITE_POIS_URL=https://<host>/pois.pmtiles' >> .env.local
 npm run dev            # http://localhost:5173
 npm run build          # tsc + vite build (CF Pages output in dist/)
 npm test               # pure-logic unit tests
 ```
 
-Needs a running Worker (`worker/`, or `wrangler dev`) and a `network.pmtiles`
-(from the `build/` pipeline). Until both exist, `npm run dev` loads but shows an
-empty map.
+Needs a running Worker (`worker/`, or `wrangler dev`). Without it the map loads
+but shows no reach; without `network.pmtiles` / `pois.pmtiles` (from `build/`) it
+shows no road types / POIs.
 
 ## What is tested vs. what you verify
 
@@ -41,17 +47,19 @@ can't drive a real canvas.
 
 Fitness scaling both speeds equally leaves the optimal route unchanged (every cost
 divides by the same factor), so it is a pure restyle — never a re-route. This is
-enforced in `lib/profile.ts` and `MapView.tsx`, and asserted in the tests; the
-panel is colour-coded (blue = Worker call, green = client-side) so the boundary
-stays visible.
+enforced in `lib/profile.ts` and `MapView.tsx`, and asserted in the tests.
 
-## How the effort colouring joins
+## How reach is drawn
 
-The Worker returns `(edge_id → time, cum_ascent)`; `MapView` pushes it onto the
-PMTiles line features via `setFeatureState` (the source uses `promoteId` so
-`edge_id` is the feature id). Paint expressions read `feature-state`. The route
-reuses the same tiles — `/route` returns `edge_id`s, highlighted via a second
-feature-state, so no geometry is shipped back.
+`/effort-field` is asked for min-time grids only (`grid_km: [1, 0.25]`,
+`edges: false`): the minimum reach time per cell, cropped to the reached area --
+tens to a few hundred kB. `lib/isolines.ts` smooths each grid, traces the band
+edges (marching squares) and paints the area; the 1 km level shows zoomed out,
+the 250 m level from zoom 9 in. Speed and budget redraw client-side.
+
+Earlier versions coloured every reached road through `setFeatureState` on the
+network tiles. That shipped 12 bytes per reached road (6 MB for a 4 h budget)
+and stamped every tile on every pan, which is what made the map slow.
 
 ## Not in v1 (spec)
 

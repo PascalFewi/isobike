@@ -10,6 +10,7 @@
 
 import { WORKER_URL, DEFAULT_BUDGET_S } from '../config.ts';
 import { parseEffortField, type EffortField } from './effortResponse.ts';
+import { ISO_LEVELS } from './isolines.ts';
 import type { Speeds } from './profile.ts';
 
 /** Surface class ids, matching the Worker's `Surface` enum. */
@@ -41,6 +42,10 @@ export interface RouteResult {
   readonly nodes?: number[];
   /** Full polyline `[lon, lat, elevation_m]`, when the Worker has geometry.bin. */
   readonly geometry?: Array<[number, number, number]>;
+  /** Surface along `geometry`: runs `[first vertex, class]` (0 unknown, 1 paved, 2 gravel, 3 unpaved). */
+  readonly geometry_surface?: Array<[number, number]>;
+  /** Metres per surface class. */
+  readonly surface_m?: Readonly<Record<'unknown' | 'paved' | 'gravel' | 'unpaved', number>>;
 }
 
 export interface LatLon {
@@ -72,12 +77,10 @@ export async function snap(at: LatLon): Promise<SnapResult> {
   return (await res.json()) as SnapResult;
 }
 
-/** Cell size of the min-time grid the Worker returns for isolines, km. */
-export const GRID_KM = 0.5;
-
 /**
- * `POST /effort-field` -> binary reachability field plus the isoline grid. Uses
- * the Profil speeds; `budgetS` is in *Worker* seconds (at profile speeds). The
+ * `POST /effort-field` -> the isoline grids, one per detail level, and no
+ * per-edge times (`edges: false`: megabytes the map no longer draws). Uses the
+ * Profil speeds; `budgetS` is in *Worker* seconds (at profile speeds). The
  * rider's flat speed is applied afterwards, client-side.
  */
 export async function effortField(
@@ -92,7 +95,8 @@ export async function effortField(
     v_flat: speeds.vFlatMps,
     vam: speeds.vamMps,
     max_cost: budgetS,
-    grid_km: GRID_KM,
+    grid_km: ISO_LEVELS.map((l) => l.cellKm),
+    edges: false,
     ...filterBody(filters),
   };
   const res = await fetch(`${WORKER_URL}/effort-field`, {

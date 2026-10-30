@@ -72,6 +72,31 @@ describe('parseEffortField against the worker fixture', () => {
   });
 });
 
+describe('parseEffortField with grids only (what the app requests)', () => {
+  const buf = readFileSync(join(FIXTURE_DIR, 'effort-grids.bin'));
+  const buffer = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
+  const expected = JSON.parse(readFileSync(join(FIXTURE_DIR, 'effort-grids.json'), 'utf8')) as {
+    maxTime: number;
+    grids: Array<{ nx: number; ny: number; westLon: number; northLat: number; cellLonDeg: number; cellLatDeg: number; minutesSum: number }>;
+  };
+  const field = parseEffortField(buffer);
+
+  it('carries no edges but the header', () => {
+    expect(field.count).toBe(0);
+    expect(field.edgeIds.length).toBe(0);
+    expect(field.maxTime).toBe(expected.maxTime);
+  });
+
+  it('reads every grid trailer in order', () => {
+    expect(field.grids.map(({ minutes, ...rest }) => ({ ...rest, minutesSum: minutes.reduce((a, m) => a + m, 0) })))
+      .toEqual(expected.grids);
+  });
+
+  it('rejects a truncated second grid', () => {
+    expect(() => parseEffortField(buffer.slice(0, buffer.byteLength - 2))).toThrow(/truncated/);
+  });
+});
+
 describe('parseEffortField rejects malformed input', () => {
   it('rejects a short buffer', () => {
     expect(() => parseEffortField(new ArrayBuffer(8))).toThrow(/header/);

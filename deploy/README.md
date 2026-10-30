@@ -5,7 +5,7 @@ set up once, and how a GitHub release deploys the app.
 
 ```
 browser ── Caddy :80/:443 ──┬─ /            frontend (static, current release)
-                            ├─ /data/*      network.pmtiles, meta.json (range requests)
+                            ├─ /data/*      network.pmtiles, pois.pmtiles, meta.json (range requests)
                             └─ /api/*  ──── Node routing API on 127.0.0.1:8080
                                              (one thread per core, graph in memory,
                                               geometry.bin read by range)
@@ -29,7 +29,7 @@ folder, shared read-only with anyone who has the link:
 
 **https://drive.google.com/drive/folders/1L97boYC-ZaGXpImwEYwdY6MKjwFfNcEx**
 
-Upload exactly these four files from `build/out/switzerland/` after each
+Upload exactly these five files from `build/out/switzerland/` after each
 national build, replacing the old ones (same names; directly in the folder or in
 one subfolder such as `switzerland/`, but each file name only once, since the
 download script takes the first match):
@@ -38,16 +38,18 @@ download script takes the first match):
 |---|---|---|---|
 | `graph.bin` | ~110 MB | routing API: the routing graph (nodes, directed edges, slopes, surfaces) | no |
 | `geometry.bin` | ~195 MB | routing API: full route lines with elevation (map line, GPX, elevation profile) | no |
-| `network.pmtiles` | ~45 MB | browser: the road network as vector tiles | yes, `/data/network.pmtiles` |
+| `network.pmtiles` | ~45 MB | browser: road types on the map (cycle path, main road, gravel, ...) | yes, `/data/network.pmtiles` |
+| `pois.pmtiles` | ~4 MB | browser: POIs for riders (water, bike service, food, lodging, toilets, shelters) | yes, `/data/pois.pmtiles` |
 | `meta.json` | <1 KB | build date, counts, bounding box | yes, `/data/meta.json` |
 
-Do **not** upload `network.geojson` (~430 MB; only an input for tippecanoe) or
+Do **not** upload `network.geojson` / `pois.geojson` (only inputs for tippecanoe) or
 anything from `build/cache/` (OSM extract, ~35 GB of DEM tiles, stage caches:
 all re-downloadable or rebuildable).
 
-All four files must come from **the same build**: edge ids are shared between
-`graph.bin`, `geometry.bin` and the tiles, and mixing builds paints colours on
-the wrong roads. `meta.json` carries the build date to check.
+`graph.bin`, `geometry.bin` and `network.pmtiles` must come from **the same
+build**: edge ids are shared between them, and mixing builds paints colours on
+the wrong roads. `pois.pmtiles` is independent and can be refreshed on its own
+(`python -m build.pois`, then tippecanoe -- see build/README.md). `meta.json` carries the build date to check.
 
 The server pulls them with `sudo bash /opt/isobike/bin/fetch-data.sh` and then
 needs `sudo systemctl restart isobike`. The folder sharing must stay on

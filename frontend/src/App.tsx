@@ -20,15 +20,17 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 
 import { Controls, Legend, type ControlState, type SurfaceMode } from './components/Controls.tsx';
 import { ElevationProfile } from './components/ElevationProfile.tsx';
+import { Footer } from './components/Footer.tsx';
+import { MapSettings } from './components/MapSettings.tsx';
 import { MapView, type MapWaypoint } from './components/MapView.tsx';
 import { MobileSheet, type SheetTab } from './components/MobileSheet.tsx';
 import { Planner, type LegView } from './components/Planner.tsx';
 import * as api from './lib/api.ts';
 import type { EffortField } from './lib/effortResponse.ts';
 import { coordLabel, municipalityAt, type Place } from './lib/geocode.ts';
-import { buildGpx, downloadText, type Coord } from './lib/gpx.ts';
-import { BASEMAPS, DEFAULT_BASEMAP, type BasemapKey } from './lib/mapStyle.ts';
+import { buildGpx, downloadText } from './lib/gpx.ts';
 import { FLAT_KMH_DEFAULT, displayTime, profileToSpeeds, riderVamHmh, speedFactor } from './lib/profile.ts';
+import { joinLegs, surfaceTotals } from './lib/surface.ts';
 
 interface Waypoint {
   readonly key: number;
@@ -53,17 +55,6 @@ function letter(i: number): string {
 }
 
 let nextKey = 1;
-
-/** The background choice is a per-browser convenience; storage may be unavailable. */
-const BASEMAP_STORAGE_KEY = 'isobike.basemap';
-function storedBasemap(): BasemapKey {
-  try {
-    const v = localStorage.getItem(BASEMAP_STORAGE_KEY);
-    return v !== null && v in BASEMAPS ? (v as BasemapKey) : DEFAULT_BASEMAP;
-  } catch {
-    return DEFAULT_BASEMAP;
-  }
-}
 
 /** Phones get the bottom sheet instead of floating panels; keep in step with index.css. */
 const MOBILE_QUERY = '(max-width: 760px)';
@@ -90,7 +81,8 @@ export function App(): JSX.Element {
     surfaceMode: 'all',
     flatKmh: FLAT_KMH_DEFAULT,
     budgetHours: 4,
-    basemap: storedBasemap(),
+    roadTypes: true,
+    pois: true,
   }));
   const [waypoints, setWaypoints] = useState<Waypoint[]>([]);
   /** The field on screen, what it was computed for, and the leg offset it carries. */
@@ -99,14 +91,6 @@ export function App(): JSX.Element {
   const legCache = useRef(new Map<string, api.RouteResult>());
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const [status, setStatus] = useState<string | null>(null);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(BASEMAP_STORAGE_KEY, controls.basemap);
-    } catch {
-      // Private mode or blocked storage: the choice just is not remembered.
-    }
-  }, [controls.basemap]);
 
   const speeds = useMemo(() => profileToSpeeds(controls.profileT), [controls.profileT]);
   const factor = speedFactor(controls.flatKmh, speeds);
@@ -194,16 +178,8 @@ export function App(): JSX.Element {
   }, [last, legsReady, fieldFresh, fieldKey, neededS, offsetS, speeds, filters]);
 
   // ---- route polyline + elevation ----------------------------------------- //
-  const { coords, stops } = useMemo(() => {
-    const all: Coord[] = [];
-    const stopIdx: number[] = [];
-    for (const l of legs) {
-      const g = l?.found ? l.geometry : undefined;
-      if (g !== undefined && g.length > 0) all.push(...(all.length === 0 ? g : g.slice(1)));
-      stopIdx.push(Math.max(0, all.length - 1));
-    }
-    return { coords: all, stops: stopIdx };
-  }, [legs]);
+  const { coords, stops, surfaceAt } = useMemo(() => joinLegs(legs), [legs]);
+  const surfaceM = useMemo(() => surfaceTotals(legs), [legs]);
 
   const legViews: Array<LegView | null> = legs.map((l) =>
     l === null
@@ -270,6 +246,7 @@ export function App(): JSX.Element {
     <Planner
       waypoints={waypoints.map((w, i) => ({ key: w.key, letter: letter(i), label: w.label }))}
       legs={legViews}
+      surfaceM={surfaceM}
       canExport={coords.length > 1}
       onSetPlace={setPlace}
       onAddPlace={(p) => addAt(p.lat, p.lon, p.label)}
@@ -288,7 +265,7 @@ export function App(): JSX.Element {
     />
   );
   const profile = showProfile ? (
-    <ElevationProfile coords={coords} stops={stops} letters={waypoints.map((_, i) => letter(i))} onHover={setHoverIdx} />
+    <ElevationProfile coords={coords} surfaceAt={surfaceAt} stops={stops} letters={waypoints.map((_, i) => letter(i))} onHover={setHoverIdx} />
   ) : null;
 
   return (
@@ -301,18 +278,24 @@ export function App(): JSX.Element {
         offsetS={field?.offsetS ?? 0}
         factor={factor}
         budgetHours={controls.budgetHours}
-        basemap={controls.basemap}
+        showRoadTypes={controls.roadTypes}
+        showPois={controls.pois}
         waypoints={mapWaypoints}
         route={coords.length > 1 ? coords : null}
         hover={hover}
         onPick={(lat, lon) => addAt(lat, lon)}
         onMoveWaypoint={moveTo}
       />
+      <MapSettings
+        roadTypes={controls.roadTypes}
+        pois={controls.pois}
+        onChange={(patch) => setControls((c) => ({ ...c, ...patch }))}
+      />
       {mobile ? (
         <MobileSheet
           tab={sheetTab === 'profile' && !showProfile ? 'route' : sheetTab}
           onTab={setSheetTab}
-          panels={{ route: planner, settings, profile }}
+          panels={{ route: <>{planner}<Footer /></>, settings, profile }}
           legend={field !== null ? <Legend budgetHours={controls.budgetHours} /> : null}
           onHeight={setSheetH}
         />
@@ -321,6 +304,7 @@ export function App(): JSX.Element {
           {planner}
           {settings}
           {profile}
+          <Footer />
         </>
       )}
       {status !== null && <div className="status" role="status">{status}</div>}

@@ -184,7 +184,7 @@ def tippecanoe_command(geojson: Path, pmtiles: Path) -> str:
 
 
 def upload_commands(out_dir: Path, bucket: str) -> list[str]:
-    """S3-style upload commands for the three artefacts (portable across servers).
+    """S3-style upload commands for the public artefacts (portable across servers).
 
     Uses the R2 S3 endpoint via aws-cli, so it works headless anywhere with R2 API
     credentials in the environment -- no interactive `wrangler login`. Set
@@ -194,7 +194,7 @@ def upload_commands(out_dir: Path, bucket: str) -> list[str]:
     ep = "$R2_ENDPOINT"
     return [
         f"aws s3 cp {out_dir / name} s3://{bucket}/{name} --endpoint-url {ep}"
-        for name in ("graph.bin", "meta.json", "network.pmtiles")
+        for name in ("graph.bin", "meta.json", "network.pmtiles", "pois.pmtiles")
     ]
 
 

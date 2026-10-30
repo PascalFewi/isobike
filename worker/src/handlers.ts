@@ -20,8 +20,8 @@ export interface Deps {
 
 import { snap } from './router.js';
 import { effortField, route } from './router.js';
-import type { Graph } from './binformat.js';
-import { routeGeometry, type GeometrySource } from './geometry.js';
+import { Surface, type Graph } from './binformat.js';
+import { routeGeometryWithEdges, surfaceRuns, type GeometrySource } from './geometry.js';
 import {
   ApiError,
   effortGrid,
@@ -79,8 +79,8 @@ export async function handleEffortField(graph: Graph, request: Request): Promise
     allowedSurfaces: req.allowedSurfaces,
     maxCost: req.maxCost,
   });
-  const grid = req.gridKm === undefined ? null : effortGrid(graph, field, req.gridKm);
-  const buffer = serializeEffortField(graph, source, field, grid);
+  const grids = req.gridKm.map((km) => effortGrid(graph, field, km));
+  const buffer = serializeEffortField(graph, source, field, grids, { edges: req.edges });
   return new Response(buffer, {
     status: 200,
     headers: {
@@ -112,11 +112,14 @@ export async function handleRoute(graph: Graph, request: Request, deps: Deps = {
   // Full polyline with elevations, when geometry.bin is available. A failure here
   // degrades to a route without geometry rather than failing the whole request.
   let geometry: Array<[number, number, number]> | undefined;
+  let geometrySurface: Array<[number, number]> | undefined;
   let geometryError: string | undefined;
   if (deps.geometry !== undefined) {
     try {
       const header = await deps.geometry.header();
-      geometry = await routeGeometry(graph, deps.geometry.reader, header, result.nodes, result.edgeIds);
+      const g = await routeGeometryWithEdges(graph, deps.geometry.reader, header, result.nodes, result.edgeIds);
+      geometry = g.coords;
+      geometrySurface = surfaceRuns(graph, result.edgeIds, g.edgeStart);
     } catch (err) {
       geometryError = err instanceof Error ? err.message : String(err);
     }
@@ -125,12 +128,20 @@ export async function handleRoute(graph: Graph, request: Request, deps: Deps = {
     ...base,
     found: true,
     ...(geometry !== undefined ? { geometry } : {}),
+    // [first vertex, surface class] runs along `geometry`; classes as in surface_m.
+    ...(geometrySurface !== undefined ? { geometry_surface: geometrySurface } : {}),
     ...(geometryError !== undefined ? { geometry_error: geometryError } : {}),
     cost_s: result.cost,
     dist_m: result.distM,
     ascent_m: result.ascentM,
     descent_m: result.descentM,
     max_slope_pct: result.maxSlopePct,
+    surface_m: {
+      unknown: Math.round(result.surfaceM[Surface.Unknown]),
+      paved: Math.round(result.surfaceM[Surface.Paved]),
+      gravel: Math.round(result.surfaceM[Surface.Gravel]),
+      unpaved: Math.round(result.surfaceM[Surface.Unpaved]),
+    },
     edge_ids: result.edgeIds,
     nodes: result.nodes,
   });

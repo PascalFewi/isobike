@@ -24,7 +24,7 @@ Please open an issue before a large change, so we can agree on the approach firs
 You need Node 22, and Python 3.11+ only if you rebuild the data.
 
 ```powershell
-# 1. data: download the four files from the Google Drive folder
+# 1. data: download the five files from the Google Drive folder
 #    (see deploy/README.md) into build/out/switzerland/,
 #    or build them yourself (build/README.md, ~1 h nationwide)
 
@@ -51,7 +51,7 @@ Or run the production API instead of the Worker:
 
 | directory | what |
 |---|---|
-| [build/](build/) | Python pipeline: OSM + swissALTI3D → `graph.bin`, `geometry.bin`, `network.pmtiles` |
+| [build/](build/) | Python pipeline: OSM + swissALTI3D → `graph.bin`, `geometry.bin`, `network.pmtiles`; OSM → `pois.pmtiles` |
 | [worker/](worker/) | routing core in TypeScript (Dijkstra/A*, effort field, route geometry) |
 | [server/](server/) | the routing API on Node, as deployed |
 | [frontend/](frontend/) | React + MapLibre app |

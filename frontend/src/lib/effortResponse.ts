@@ -2,15 +2,16 @@
  * Parser for the Worker's `/effort-field` binary response (VEFF v2).
  *
  * Mirrors `worker/src/protocol.ts` -- the same 32-byte header then three parallel
- * arrays (edge_id u32, time f32, cum_ascent f32), optionally followed by a grid
- * trailer ("VGRD") with the minimum minutes per map cell, which the client turns
- * into isolines at low zoom. The layout is a cross-boundary contract;
- * `frontend/test/effortResponse.test.ts` checks this parser against a fixture
- * emitted by the worker's own serializer, so drift is caught.
+ * arrays (edge_id u32, time f32, cum_ascent f32), followed by zero or more grid
+ * trailers ("VGRD") with the minimum minutes per map cell, one per requested
+ * cell size, which the client turns into isolines. The app asks for the grids
+ * alone (`edges: false`), so its responses carry no edges. The layout is a
+ * cross-boundary contract; `frontend/test/effortResponse.test.ts` checks this
+ * parser against fixtures emitted by the worker's own serializer, so drift is
+ * caught.
  *
- * Views are zero-copy over the received ArrayBuffer -- a nationwide field is
- * ~16 MB, so copying it would be wasteful; the typed arrays are read straight
- * from the response bytes.
+ * Views are zero-copy over the received ArrayBuffer; the typed arrays are read
+ * straight from the response bytes.
  */
 
 const MAGIC = 'VEFF';
@@ -45,8 +46,8 @@ export interface EffortField {
   readonly edgeIds: Uint32Array;
   readonly times: Float32Array;
   readonly cumAscents: Float32Array;
-  /** Present when the request asked for `grid_km`. */
-  readonly grid: EffortGrid | null;
+  /** One per `grid_km` size of the request, in its order. */
+  readonly grids: readonly EffortGrid[];
 }
 
 function ascii(bytes: Uint8Array, at: number): string {
@@ -70,25 +71,26 @@ export function parseEffortField(buffer: ArrayBuffer): EffortField {
 
   const count = view.getUint32(8, true);
   const body = HEADER_SIZE + 12 * count;
-  let grid: EffortGrid | null = null;
-  if (buffer.byteLength > body) {
-    if (ascii(bytes, body) !== GRID_MAGIC) throw new Error('effort-field has trailing bytes without a grid');
-    const nx = view.getUint32(body + 4, true);
-    const ny = view.getUint32(body + 8, true);
-    if (buffer.byteLength !== body + GRID_HEADER_SIZE + 2 * nx * ny) {
-      throw new Error('effort-field grid truncated');
-    }
-    grid = {
+  if (buffer.byteLength < body) {
+    throw new Error(`effort-field truncated: ${buffer.byteLength} bytes, expected ${body}`);
+  }
+  const grids: EffortGrid[] = [];
+  for (let at = body; at < buffer.byteLength; ) {
+    if (ascii(bytes, at) !== GRID_MAGIC) throw new Error('effort-field has trailing bytes without a grid');
+    const nx = view.getUint32(at + 4, true);
+    const ny = view.getUint32(at + 8, true);
+    const end = at + GRID_HEADER_SIZE + 2 * nx * ny;
+    if (buffer.byteLength < end) throw new Error('effort-field grid truncated');
+    grids.push({
       nx,
       ny,
-      westLon: view.getFloat32(body + 12, true),
-      northLat: view.getFloat32(body + 16, true),
-      cellLonDeg: view.getFloat32(body + 20, true),
-      cellLatDeg: view.getFloat32(body + 24, true),
-      minutes: new Uint16Array(buffer, body + GRID_HEADER_SIZE, nx * ny),
-    };
-  } else if (buffer.byteLength !== body) {
-    throw new Error(`effort-field truncated: ${buffer.byteLength} bytes, expected ${body}`);
+      westLon: view.getFloat32(at + 12, true),
+      northLat: view.getFloat32(at + 16, true),
+      cellLonDeg: view.getFloat32(at + 20, true),
+      cellLatDeg: view.getFloat32(at + 24, true),
+      minutes: new Uint16Array(buffer, at + GRID_HEADER_SIZE, nx * ny),
+    });
+    at = end;
   }
 
   return {
@@ -101,6 +103,6 @@ export function parseEffortField(buffer: ArrayBuffer): EffortField {
     edgeIds: new Uint32Array(buffer, HEADER_SIZE, count),
     times: new Float32Array(buffer, HEADER_SIZE + 4 * count, count),
     cumAscents: new Float32Array(buffer, HEADER_SIZE + 8 * count, count),
-    grid,
+    grids,
   };
 }

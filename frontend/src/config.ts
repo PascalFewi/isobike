@@ -17,13 +17,27 @@ function resolve(url: string): string {
 /** Routing API base: `/api` in production, http://localhost:8787 in dev. */
 export const WORKER_URL: string = resolve(import.meta.env.VITE_WORKER_URL ?? 'http://localhost:8787');
 
-/** PMTiles archive: `/data/network.pmtiles` in production. */
-export const PMTILES_URL: string = resolve(
+/**
+ * Basemap: a MapLibre style URL. OpenFreeMap's Positron (light grey, Europe-wide,
+ * free, no key) for now; a self-hosted Protomaps style later.
+ */
+export const BASEMAP_STYLE_URL: string = resolve(
+  import.meta.env.VITE_BASEMAP_STYLE_URL ?? 'https://tiles.openfreemap.org/styles/positron',
+);
+
+/** Bike network with road class and surface (build/export.py): `/data/network.pmtiles` in production. */
+export const NETWORK_URL: string = resolve(
   import.meta.env.VITE_PMTILES_URL ?? 'http://localhost:8788/network.pmtiles',
 );
 
-/** The PMTiles source layer name tippecanoe was told to write (`-l network`). */
-export const TILE_LAYER = 'network';
+/** Source layer of the network tiles (`-l network`). */
+export const NETWORK_TILE_LAYER = 'network';
+
+/** Cycling POIs (build/pois.py): `/data/pois.pmtiles` in production. */
+export const POIS_URL: string = resolve(import.meta.env.VITE_POIS_URL ?? 'http://localhost:8788/pois.pmtiles');
+
+/** Source layer of the POI tiles (`-l pois`). */
+export const POI_TILE_LAYER = 'pois';
 
 /** Initial map view -- centred on Switzerland. */
 export const INITIAL_VIEW = { lon: 8.23, lat: 46.8, zoom: 8 } as const;

@@ -1,14 +1,14 @@
 /**
- * Reach display up to region scale: isolines at the band edges plus a soft area
- * fill, both computed client-side from the Worker's min-time grid (500 m cells).
+ * The reach display: isolines at the band edges plus a soft area fill, both
+ * computed client-side from the Worker's min-time grids, at every zoom.
  *
- * From country down to region scale a surface reads better than single roads.
- * The grid is smoothed first -- a min filter closes the gaps between roads
- * (~{@link GAP_REACH_KM}, with an off-road penalty per km), then a masked box
- * blur softens the cell steps -- and marching squares traces each band edge.
- * The filter reach and penalty are in km, so a change of grid size keeps the
- * look. The fill is the same smoothed field, banded and painted into an
- * RGBA image that MapLibre drapes over the grid's bbox.
+ * Two detail levels ({@link ISO_LEVELS}): a 1 km grid for the country view and a
+ * 250 m grid from region scale in. Each grid is smoothed first -- a min filter
+ * closes the gaps between roads (up to the level's `gapKm`, with an off-road
+ * penalty per km), then a masked box blur softens the cell steps -- and
+ * marching squares traces each band edge. The fine level closes smaller gaps,
+ * so its area hugs the roads. The fill is the same smoothed field, banded and
+ * painted into an RGBA image that MapLibre drapes over the grid's bbox.
  *
  * Times are *displayed* minutes: Worker minutes plus the leg offset, divided by
  * the rider's speed factor, so isolines move with the speed slider for free.
@@ -18,8 +18,23 @@ import { BAND_COLORS, N_BANDS, bandStepS } from './colorScale.ts';
 import { GRID_NONE, type EffortGrid } from './effortResponse.ts';
 
 const INF = Number.POSITIVE_INFINITY;
-/** How far a reached road "fills" towards roadless cells, km. */
-const GAP_REACH_KM = 1;
+
+export interface IsoLevel {
+  /** Grid cell size the Worker is asked for, km. */
+  readonly cellKm: number;
+  /** How far a reached road "fills" towards roadless cells, km. */
+  readonly gapKm: number;
+  /** Zoom range the level shows in (MapLibre layer minzoom / maxzoom). */
+  readonly minzoom: number;
+  readonly maxzoom: number;
+}
+
+/** Coarse to fine; the zoom ranges meet, so exactly one level shows at a time. */
+export const ISO_LEVELS: readonly IsoLevel[] = [
+  { cellKm: 1, gapKm: 1, minzoom: 0, maxzoom: 9 },
+  { cellKm: 0.25, gapKm: 0.5, minzoom: 9, maxzoom: 24 },
+];
+
 /** Extra minutes per km charged for that fill: it is not a road you ride. */
 const GAP_PENALTY_MIN_PER_KM = 4;
 const BLUR_RADIUS = 1;
@@ -27,31 +42,40 @@ const MIN_WEIGHT = 0.3;
 const KM_PER_DEG_LAT = 110.54;
 
 /** Displayed minutes per cell, smoothed; Infinity where nothing is reached. */
-export function smoothField(grid: EffortGrid, offsetMin: number, factor: number): Float32Array {
+export function smoothField(grid: EffortGrid, offsetMin: number, factor: number, gapKm = 1): Float32Array {
   const { nx, ny, minutes } = grid;
   const raw = new Float32Array(nx * ny);
   for (let i = 0; i < raw.length; i++) {
     raw[i] = minutes[i] === GRID_NONE ? INF : (minutes[i] + offsetMin) / factor;
   }
-  // Min filter over a disc of GAP_REACH_KM, charging the off-road distance.
+  // Min filter over a disc of gapKm, charging the off-road distance. Flat
+  // typed arrays: this loop runs (disc size) times per cell.
   const cellKm = grid.cellLatDeg * KM_PER_DEG_LAT;
-  const r = Math.max(1, Math.round(GAP_REACH_KM / cellKm));
-  const offsets: Array<[number, number, number]> = [];
+  const r = Math.max(1, Math.round(gapKm / cellKm));
+  const ox: number[] = [];
+  const oy: number[] = [];
+  const op: number[] = [];
   for (let dy = -r; dy <= r; dy++) {
     for (let dx = -r; dx <= r; dx++) {
       const d = Math.hypot(dx, dy);
-      if (d <= r + 0.5) offsets.push([dx, dy, d * cellKm * GAP_PENALTY_MIN_PER_KM]);
+      if (d > r + 0.5) continue;
+      ox.push(dx);
+      oy.push(dy);
+      op.push(d * cellKm * GAP_PENALTY_MIN_PER_KM);
     }
   }
+  const offX = Int32Array.from(ox);
+  const offY = Int32Array.from(oy);
+  const offPen = Float32Array.from(op);
   const filled = new Float32Array(nx * ny);
   for (let y = 0; y < ny; y++) {
     for (let x = 0; x < nx; x++) {
       let m = INF;
-      for (const [dx, dy, pen] of offsets) {
-        const xx = x + dx;
-        const yy = y + dy;
+      for (let k = 0; k < offX.length; k++) {
+        const xx = x + offX[k];
+        const yy = y + offY[k];
         if (xx < 0 || yy < 0 || xx >= nx || yy >= ny) continue;
-        const v = raw[yy * nx + xx] + pen;
+        const v = raw[yy * nx + xx] + offPen[k];
         if (v < m) m = v;
       }
       filled[y * nx + x] = m;
@@ -118,45 +142,102 @@ function toLonLat(grid: EffortGrid, gx: number, gy: number): [number, number] {
   return [grid.westLon + (gx + 0.5) * grid.cellLonDeg, grid.northLat - (gy + 0.5) * grid.cellLatDeg];
 }
 
+/** Cell value for contouring: unreached counts as "above" every level, so lines close at the reach edge. */
+function levelValue(field: Float32Array, i: number, level: number): number {
+  const t = field[i];
+  return t === INF ? level + 1e4 : t;
+}
+
 /**
- * Marching squares at `level` minutes. Returns 2-point segments in grid units;
- * unreached cells count as "above" every level so lines close at the reach edge.
+ * Marching squares at `level` minutes. Returns each segment as a pair of crossed
+ * grid edges: `2 * cell` is the edge from that cell's corner east, `2 * cell + 1`
+ * the edge south. Neighbouring cells name a shared edge alike, which is what
+ * lets {@link contourLines} join the segments.
  */
-export function contourSegments(field: Float32Array, nx: number, ny: number, level: number): number[] {
-  const segs: number[] = [];
-  const v = (x: number, y: number): number => {
-    const t = field[y * nx + x];
-    return t === INF ? level + 1e4 : t;
-  };
+function crossedEdges(field: Float32Array, nx: number, ny: number, level: number): number[] {
+  const edges: number[] = [];
   for (let y = 0; y < ny - 1; y++) {
     for (let x = 0; x < nx - 1; x++) {
-      const a = v(x, y);
-      const b = v(x + 1, y);
-      const c = v(x + 1, y + 1);
-      const d = v(x, y + 1);
+      const i = y * nx + x;
+      const a = levelValue(field, i, level);
+      const b = levelValue(field, i + 1, level);
+      const c = levelValue(field, i + nx + 1, level);
+      const d = levelValue(field, i + nx, level);
       const idx = (a < level ? 8 : 0) | (b < level ? 4 : 0) | (c < level ? 2 : 0) | (d < level ? 1 : 0);
       if (idx === 0 || idx === 15) continue;
-      const f = (p: number, q: number): number => (level - p) / (q - p);
-      const T = [x + f(a, b), y];
-      const Rt = [x + 1, y + f(b, c)];
-      const B = [x + f(d, c), y + 1];
-      const L = [x, y + f(a, d)];
-      const add = (p: number[], q: number[]): void => {
-        segs.push(p[0], p[1], q[0], q[1]);
-      };
+      const T = 2 * i;
+      const B = 2 * (i + nx);
+      const L = 2 * i + 1;
+      const Rt = 2 * (i + 1) + 1;
       switch (idx) {
-        case 1: case 14: add(L, B); break;
-        case 2: case 13: add(B, Rt); break;
-        case 3: case 12: add(L, Rt); break;
-        case 4: case 11: add(T, Rt); break;
-        case 5: add(L, T); add(B, Rt); break;
-        case 6: case 9: add(T, B); break;
-        case 7: case 8: add(L, T); break;
-        case 10: add(T, Rt); add(L, B); break;
+        case 1: case 14: edges.push(L, B); break;
+        case 2: case 13: edges.push(B, Rt); break;
+        case 3: case 12: edges.push(L, Rt); break;
+        case 4: case 11: edges.push(T, Rt); break;
+        case 5: edges.push(L, T, B, Rt); break;
+        case 6: case 9: edges.push(T, B); break;
+        case 7: case 8: edges.push(L, T); break;
+        case 10: edges.push(T, Rt, L, B); break;
       }
     }
   }
+  return edges;
+}
+
+/** Where `level` crosses grid edge `e` (see {@link crossedEdges}), in grid units. */
+function edgePoint(field: Float32Array, nx: number, level: number, e: number): [number, number] {
+  const i = e >> 1;
+  const x = i % nx;
+  const y = (i - x) / nx;
+  const a = levelValue(field, i, level);
+  if ((e & 1) === 0) return [x + (level - a) / (levelValue(field, i + 1, level) - a), y];
+  return [x, y + (level - a) / (levelValue(field, i + nx, level) - a)];
+}
+
+/** Marching squares at `level` minutes as loose 2-point segments, flat x, y in grid units. */
+export function contourSegments(field: Float32Array, nx: number, ny: number, level: number): number[] {
+  const segs: number[] = [];
+  for (const e of crossedEdges(field, nx, ny, level)) segs.push(...edgePoint(field, nx, level, e));
   return segs;
+}
+
+/**
+ * Marching squares at `level` minutes, joined into polylines (flat x, y in grid
+ * units). A closed ring comes back with its first point repeated at the end.
+ */
+export function contourLines(field: Float32Array, nx: number, ny: number, level: number): number[][] {
+  const edges = crossedEdges(field, nx, ny, level);
+  const nSeg = edges.length / 2;
+  // A crossed edge is shared by at most two segments, one from each cell beside it.
+  const segsAt = new Map<number, number[]>();
+  for (let k = 0; k < edges.length; k++) {
+    const list = segsAt.get(edges[k]);
+    if (list === undefined) segsAt.set(edges[k], [k >> 1]);
+    else list.push(k >> 1);
+  }
+  const used = new Uint8Array(nSeg);
+  // Leave edge `e` through its unused segment: that segment's far edge, or -1.
+  const next = (e: number): number => {
+    for (const s of segsAt.get(e)!) {
+      if (used[s] === 1) continue;
+      used[s] = 1;
+      return edges[2 * s] === e ? edges[2 * s + 1] : edges[2 * s];
+    }
+    return -1;
+  };
+  const lines: number[][] = [];
+  for (let s = 0; s < nSeg; s++) {
+    if (used[s] === 1) continue;
+    used[s] = 1;
+    const ahead = [edges[2 * s], edges[2 * s + 1]];
+    for (let e = next(ahead[1]); e !== -1; e = next(e)) ahead.push(e);
+    const behind: number[] = [];
+    for (let e = next(ahead[0]); e !== -1; e = next(e)) behind.push(e);
+    const pts: number[] = [];
+    for (const e of behind.reverse().concat(ahead)) pts.push(...edgePoint(field, nx, level, e));
+    lines.push(pts);
+  }
+  return lines;
 }
 
 export interface IsolineFeature {
@@ -176,11 +257,11 @@ export function isolines(
   const features: IsolineFeature[] = [];
   for (let k = 1; k <= N_BANDS; k++) {
     const level = Math.min(k * stepMin, budgetMin);
-    const segs = contourSegments(field, grid.nx, grid.ny, level);
-    const lines: Array<Array<[number, number]>> = [];
-    for (let i = 0; i < segs.length; i += 4) {
-      lines.push([toLonLat(grid, segs[i], segs[i + 1]), toLonLat(grid, segs[i + 2], segs[i + 3])]);
-    }
+    const lines = contourLines(field, grid.nx, grid.ny, level).map((pts) => {
+      const line: Array<[number, number]> = [];
+      for (let i = 0; i < pts.length; i += 2) line.push(toLonLat(grid, pts[i], pts[i + 1]));
+      return line;
+    });
     const last = level >= budgetMin;
     features.push({
       type: 'Feature',

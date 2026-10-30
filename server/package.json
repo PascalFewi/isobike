@@ -1,6 +1,7 @@
 {
   "name": "isobike-server",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "description": "Routing API for the self-hosted deployment: the Worker's handlers on Node, one thread per core.",

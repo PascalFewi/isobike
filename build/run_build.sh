@@ -75,17 +75,22 @@ log "tippecanoe -> network.pmtiles"
 tippecanoe -o "$OUT/network.pmtiles" -l network -zg \
   --drop-densest-as-needed --extend-zooms-if-still-dropping --force "$OUT/network.geojson"
 
+# --- 6. cycling POIs (water, bike shops, repair, ...) -> pois.pmtiles ---------- #
+log "cycling POIs -> pois.pmtiles"
+( cd "$REPO" && python -m build.pois --region "$REGION" --pbf "$PBF" )
+tippecanoe -o "$OUT/pois.pmtiles" -l pois -Z10 -z14 -r1 --force "$OUT/pois.geojson"
+
 ls -lh "$OUT"
 
-# --- 6. upload to R2 (optional) ----------------------------------------------- #
+# --- 7. upload to R2 (optional) ----------------------------------------------- #
 if [ -n "${R2_BUCKET:-}" ] && [ -n "${R2_ENDPOINT:-}" ]; then
   log "uploading to R2 bucket $R2_BUCKET"
   python -m pip install -q awscli
-  for f in graph.bin meta.json network.pmtiles; do
+  for f in graph.bin meta.json network.pmtiles pois.pmtiles; do
     aws s3 cp "$OUT/$f" "s3://$R2_BUCKET/$f" --endpoint-url "$R2_ENDPOINT"
   done
   log "uploaded. Enable public access on the bucket (or a custom domain) so the"
-  log "frontend can range-request network.pmtiles; graph.bin stays private (Worker reads it)."
+  log "frontend can range-request network.pmtiles + pois.pmtiles; graph.bin stays private (Worker reads it)."
 else
   log "R2_BUCKET/R2_ENDPOINT not set -- skipping upload. Artefacts are in $OUT"
 fi

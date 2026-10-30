@@ -1,6 +1,6 @@
 # build — the graph pipeline (runs anywhere, not deployed)
 
-Turns OSM + a DEM into the R2 artefacts: `graph.bin` (v2), `network.pmtiles`,
+Turns OSM + a DEM into the R2 artefacts: `graph.bin` (v2), `network.pmtiles`, `pois.pmtiles`,
 `meta.json`. Both data adapters are implemented and **verified on real OSM + real
 DEM** (a real routable `graph.bin` built from a live extract).
 
@@ -28,6 +28,15 @@ Or drive the stages directly:
 pip install -r build/requirements-build.txt
 python -m build.build_graph --region test-oberland --pbf switzerland-latest.osm.pbf
 tippecanoe -o out/.../network.pmtiles -l network -zg --drop-densest-as-needed out/.../network.geojson
+```
+
+The POIs for riders (drinking water, bike service, food shops, cafés,
+restaurants, lodging, toilets, shelters) are a separate, fast step -- no DEM, a few seconds
+nationwide -- so they can be refreshed without rebuilding the graph:
+
+```bash
+python -m build.pois --region switzerland --pbf switzerland-latest.osm.pbf
+tippecanoe -o out/switzerland/pois.pmtiles -l pois -Z10 -z14 -r1 --force out/switzerland/pois.geojson
 ```
 
 Points outside swissALTI3D coverage (border strips of the Geofabrik extract)

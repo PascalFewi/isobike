@@ -29,7 +29,15 @@ More detail: [specs.md](specs.md) (design and cost model) ·
 [build/](build/README.md) (data pipeline) · [deploy/](deploy/README.md) (data
 files and hosting).
 
+## License
+
+The code is under the [MIT License](LICENSE). The map data is not: everything
+derived from OpenStreetMap (road network, POIs) stays under the
+[ODbL](https://opendatacommons.org/licenses/odbl/), see Credits.
+
 ## Credits
 
-Road network © [OpenStreetMap](https://www.openstreetmap.org/copyright)
-contributors (ODbL). Elevation and basemap © [swisstopo](https://www.swisstopo.admin.ch).
+Road network and POIs © [OpenStreetMap](https://www.openstreetmap.org/copyright)
+contributors (ODbL). Elevation © [swisstopo](https://www.swisstopo.admin.ch).
+Basemap: [OpenFreeMap](https://openfreemap.org) © [OpenMapTiles](https://openmaptiles.org),
+data from OpenStreetMap.

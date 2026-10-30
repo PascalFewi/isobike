@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { Surface, effortField, route, snap } from '../src/lib/api.ts';
+import { ISO_LEVELS } from '../src/lib/isolines.ts';
 import { fromKmh } from '../src/lib/profile.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -35,13 +36,14 @@ function mockFetch(response: () => Response): Captured {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('effortField request', () => {
-  it('sends profile speeds, the budget and the grid size, never a speed factor', async () => {
+  it('sends profile speeds, the budget and the grid sizes, never a speed factor or edges', async () => {
     const cap = mockFetch(() => new Response(SAMPLE_AB, { status: 200 }));
     const field = await effortField({ lat: 46.5, lon: 8.03 }, MIXED, {}, 28800);
 
     expect(cap.url).toContain('/effort-field');
     expect(cap.body).toMatchObject({
-      lat: 46.5, lon: 8.03, v_flat: MIXED.vFlatMps, vam: MIXED.vamMps, max_cost: 28800, grid_km: 0.5,
+      lat: 46.5, lon: 8.03, v_flat: MIXED.vFlatMps, vam: MIXED.vamMps, max_cost: 28800,
+      grid_km: ISO_LEVELS.map((l) => l.cellKm), edges: false,
     });
     expect(cap.body).not.toHaveProperty('fitness');
     expect(cap.body).not.toHaveProperty('alpha');
