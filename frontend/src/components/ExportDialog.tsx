@@ -10,6 +10,7 @@
 
 import { useEffect, useRef, type ReactNode } from 'react';
 
+import { AdSlot } from './AdSlot.tsx';
 import { BIKES, formLabel, profileLabel, type ControlState } from './Controls.tsx';
 import { Facts, LegLine, SurfaceBar, hm, km, routeTotals, type LegView } from './Planner.tsx';
 import type { SurfaceKey } from '../lib/surface.ts';
@@ -92,6 +93,8 @@ export function ExportDialog(props: Props): JSX.Element {
                 <span>Max. Steigung <strong>{controls.maxSlope === null ? 'aus' : `${controls.maxSlope} %`}</strong></span>
               </div>
             </section>
+
+            <AdSlot id="export" />
 
             <section aria-label="Hinweise">
               <h3>Bitte beachten</h3>

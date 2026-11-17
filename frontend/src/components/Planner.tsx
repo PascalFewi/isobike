@@ -9,6 +9,7 @@ import { useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNod
 import type { Place } from '../lib/geocode.ts';
 import { SURFACES, SURFACE_INFO, type SurfaceKey } from '../lib/surface.ts';
 import { dropIndex } from '../lib/waypoints.ts';
+import { AdSlot } from './AdSlot.tsx';
 import { GitHubIcon, REPO_URL } from './Footer.tsx';
 import { PlaceInput } from './PlaceInput.tsx';
 
@@ -211,6 +212,8 @@ export function Planner(props: Props): JSX.Element {
         <button type="button" className="secondary" disabled={waypoints.length < 2} onClick={props.onRoundTrip}>Hin und zurück</button>
         <button type="button" className="secondary" disabled={waypoints.length < 2} onClick={props.onReverse}>Umkehren</button>
       </div>
+
+      <AdSlot id="planner" />
 
       {waypoints.length === 0 && (
         <p className="intro">

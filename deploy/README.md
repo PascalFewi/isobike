@@ -18,8 +18,8 @@ browser ── Caddy :80/:443 ──┬─ /            frontend (static, curren
 | [activate.sh](activate.sh) | switches to an uploaded release; rolls back if the health check fails |
 | [Caddyfile](Caddyfile) | web server: frontend, public data, `/api` → Node, TLS once there is a domain |
 | [isobike.service](isobike.service) | systemd unit for the routing API |
-| [goaccess.service](goaccess.service) | live visitor stats from Caddy's log, at `/stats/` |
-| [caddy-stats.conf](caddy-stats.conf) | systemd drop-in: Caddy reads the stats login from a server-only file |
+| [setup-umami.sh](setup-umami.sh) | installs self-hosted Umami (usage statistics) |
+| [umami/docker-compose.yml](umami/docker-compose.yml) | Umami and its Postgres database |
 | [../.github/workflows/release.yml](../.github/workflows/release.yml) | test, build and deploy on a published release |
 
 ## Data
@@ -83,7 +83,7 @@ on the default branch are never deployed.
    # the argument is the content of isobike_deploy.pub from your PC (one line)
    sudo bash deploy/setup-server.sh "ssh-ed25519 AAAA... github-deploy"
    ```
-   This installs Node 22, Caddy, GoAccess and gdown, creates the users `isobike` (runs the
+   This installs Node 22, Caddy, gdown and Umami (in Docker), creates the users `isobike` (runs the
    API) and `deploy` (GitHub logs in as this user and may only restart the API),
    opens ports 22/80/443 and downloads the data from Google Drive.
 4. In GitHub: **Settings → Environments → New environment `production`**, and add
@@ -123,27 +123,47 @@ URLs, so it needs no rebuild.
 
 ## Visitor stats
 
-**https://isobike.ch/stats/** shows a live GoAccess dashboard built from Caddy's
-access log: visitors per day, pages, `/api` calls, browsers, phone vs. desktop.
-No tracking script and no cookies; known bots are left out. It needs a login,
-which lives only on the server. Until one is set, `/stats/` stays locked.
+Usage is counted with a self-hosted [Umami](https://umami.is) on the same
+server (no cookies, no third party). Dashboard: **https://stats.isobike.ch**.
 
-Set or change the login (as root):
+Besides page views the app records a few events
+([frontend/src/lib/analytics.ts](../frontend/src/lib/analytics.ts)): a point
+set (map or search), the export dialog opened, a GPX downloaded, round trip.
+Never coordinates, place names or routes. What is collected is described in the
+app's Datenschutzerklärung (footer); keep the two in step.
+
+Umami and its Postgres database run in Docker under `/opt/umami`
+([umami/docker-compose.yml](umami/docker-compose.yml)), capped at about 850 MB
+of memory together. Caddy serves them at `stats.isobike.ch`.
+
+Setup:
+
+1. DNS: `stats` as `CNAME` → `isobike.ch.` (Caddy then gets the certificate).
+2. [setup-server.sh](setup-server.sh) installs Umami on a new server. On a
+   server that is already running, from your PC:
+   ```bash
+   scp deploy/setup-umami.sh deploy/umami/docker-compose.yml root@<server>:/tmp/
+   ssh root@<server> bash /tmp/setup-umami.sh
+   ```
+3. Open https://stats.isobike.ch, log in with `admin` / `umami`, **change the
+   password**, then *Settings → Websites → Add website* (domain `isobike.ch`).
+4. Copy the website ID into `VITE_UMAMI_WEBSITE_ID` in
+   [frontend/.env.production](../frontend/.env.production) and publish a release.
+   While the ID is empty the app loads no statistics script.
+
+Day to day (as root on the server):
 
 ```bash
-caddy hash-password                       # type the password, copy the $2a$... line
-cat > /etc/caddy/stats.env <<'EOF'
-STATS_USER=pascal
-STATS_PASS_HASH='$2a$14$...paste here...'
-EOF
-chmod 600 /etc/caddy/stats.env
-systemctl restart caddy                   # restart, not reload: re-reads the file
+cd /opt/umami
+docker compose ps                                # running?
+docker stats --no-stream                         # memory in use
+docker compose logs -f umami                     # log
+docker compose pull && docker compose up -d      # update Umami
+docker compose exec db pg_dump -U umami umami | gzip > umami-backup.sql.gz   # backup
 ```
 
-Keep the single quotes around the hash, since it contains `$`. If the page loads
-but its numbers do not update, the WebSocket is not getting through:
-`journalctl -u goaccess`. The real visitors are best counted by the visitors
-of `/api/effort-field`: only people who set a start point call it.
+Caddy still writes its access log to `/var/log/caddy/isobike.log`, for
+debugging only.
 
 ## Secrets in a public repo
 
@@ -164,9 +184,10 @@ of `/api/effort-field`: only people who set a start point call it.
   machine would receive the release package (public code anyway) and could fake
   a successful deploy, but it could not use the deploy key on the real server.
   Set it if you want deploys to fail loudly in that case.
-- **The stats login is server-only.** The Caddyfile reads it from
-  `/etc/caddy/stats.env`. Its fallback hash in the repo belongs to a random
-  password that was thrown away, so it unlocks nothing.
+- **The Umami website ID is not a secret.** It is in every visitor's page
+  source; `VITE_UMAMI_DOMAINS` makes the script count only on the real domain.
+  Umami's own secrets (database password, app secret) are generated on the
+  server into `/opt/umami/.env` and never leave it.
 - **Never commit** `.env.local`, private keys, or server passwords. `.gitignore`
   already excludes `.env.local`; check `git status` before committing.
 - The server IP is not a secret as such, but it is kept in `DEPLOY_HOST` so the

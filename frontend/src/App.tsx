@@ -26,6 +26,7 @@ import { MapButtons } from './components/MapButtons.tsx';
 import { MapView, type MapWaypoint, type WaypointAction } from './components/MapView.tsx';
 import { MobileSheet, type SheetTab } from './components/MobileSheet.tsx';
 import { Planner, type LegView } from './components/Planner.tsx';
+import { track } from './lib/analytics.ts';
 import * as api from './lib/api.ts';
 import type { EffortField } from './lib/effortResponse.ts';
 import { coordLabel, municipalityAt, type Place } from './lib/geocode.ts';
@@ -218,10 +219,11 @@ export function App(): JSX.Element {
     });
   }, []);
 
-  const addAt = (lat: number, lon: number, label?: string): void => {
+  const addAt = (lat: number, lon: number, label?: string, via: 'map' | 'search' = label === undefined ? 'map' : 'search'): void => {
     const key = nextKey++;
     setWaypoints((ws) => [...ws, { key, lat, lon, label: label ?? coordLabel(lat, lon) }]);
     if (label === undefined) nameLater(key, lat, lon);
+    track('point-add', { via, n: waypoints.length + 1 });
   };
   const setPlace = (i: number, p: Place): void =>
     setWaypoints((ws) => ws.map((w, k) => (k === i ? { ...w, lat: p.lat, lon: p.lon, label: p.label } : w)));
@@ -234,12 +236,15 @@ export function App(): JSX.Element {
     setWaypoints((ws) => ws.filter((_, k) => k !== i));
     setMoving(null);
   };
-  const roundTrip = (): void => setWaypoints((ws) => outAndBack(ws, (w) => ({ ...w, key: nextKey++ })));
+  const roundTrip = (): void => {
+    setWaypoints((ws) => outAndBack(ws, (w) => ({ ...w, key: nextKey++ })));
+    track('round-trip', { points: waypoints.length });
+  };
   const waypointAction = (i: number, action: WaypointAction): void => {
     const w = waypoints[i];
     if (w === undefined) return;
     if (action === 'delete') remove(i);
-    else if (action === 'again') addAt(w.lat, w.lon, w.label);
+    else if (action === 'again') addAt(w.lat, w.lon, w.label, 'map');
     else setMoving(i);
   };
   const pick = (lat: number, lon: number): void => {
@@ -270,6 +275,8 @@ export function App(): JSX.Element {
     );
     const slug = name.toLowerCase().replace(/[^a-z0-9äöü]+/g, '-').replace(/^-|-$/g, '');
     downloadText(`velorouter-${slug || 'route'}.gpx`, gpx);
+    const distM = legs.reduce((s, l) => s + (l?.dist_m ?? 0), 0);
+    track('gpx-download', { points: waypoints.length, km: Math.round(distM / 1000), bike: controls.bike });
   };
 
   const mapWaypoints: MapWaypoint[] = useMemo(
@@ -296,7 +303,10 @@ export function App(): JSX.Element {
       onReverse={() => setWaypoints((ws) => [...ws].reverse())}
       onRoundTrip={roundTrip}
       onClear={() => setWaypoints([])}
-      onExport={() => setExportOpen(true)}
+      onExport={() => {
+        setExportOpen(true);
+        track('export-open', { points: waypoints.length });
+      }}
     />
   );
   const profile = showProfile ? (

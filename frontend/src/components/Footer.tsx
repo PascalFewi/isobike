@@ -3,12 +3,15 @@
  * under the map on desktop; at the end of the route tab on phones.
  */
 
+import { useState } from 'react';
+
+import { PrivacyDialog } from './PrivacyDialog.tsx';
+
 export const REPO_URL = 'https://github.com/PascalFewi/isobike';
 /** Contact opens a new issue on the repository. */
 const CONTACT_URL = `${REPO_URL}/issues/new`;
-// TODO: real pages once written.
+// TODO: real page once written.
 const IMPRESSUM_URL = '#impressum';
-const DATENSCHUTZ_URL = '#datenschutz';
 
 export function GitHubIcon({ size = 14 }: { readonly size?: number }): JSX.Element {
   return (
@@ -19,15 +22,27 @@ export function GitHubIcon({ size = 14 }: { readonly size?: number }): JSX.Eleme
 }
 
 export function Footer(): JSX.Element {
+  const [privacyOpen, setPrivacyOpen] = useState(false);
   return (
-    <footer className="footer">
-      <span>Autor Pascal Feigenwinter 2026</span>
-      <a href={REPO_URL} target="_blank" rel="noopener noreferrer">
-        <GitHubIcon size={12} /> Code Open Source auf GitHub
-      </a>
-      <a href={IMPRESSUM_URL}>Impressum</a>
-      <a href={DATENSCHUTZ_URL}>Datenschutz</a>
-      <a href={CONTACT_URL} target="_blank" rel="noopener noreferrer">Kontakt</a>
-    </footer>
+    <>
+      <footer className="footer">
+        <span>Autor Pascal Feigenwinter 2026</span>
+        <a href={REPO_URL} target="_blank" rel="noopener noreferrer">
+          <GitHubIcon size={12} /> Code Open Source auf GitHub
+        </a>
+        <a href={IMPRESSUM_URL}>Impressum</a>
+        <a
+          href="#datenschutz"
+          onClick={(e) => {
+            e.preventDefault();
+            setPrivacyOpen(true);
+          }}
+        >
+          Datenschutz
+        </a>
+        <a href={CONTACT_URL} target="_blank" rel="noopener noreferrer">Kontakt</a>
+      </footer>
+      <PrivacyDialog open={privacyOpen} onClose={() => setPrivacyOpen(false)} contactUrl={CONTACT_URL} />
+    </>
   );
 }

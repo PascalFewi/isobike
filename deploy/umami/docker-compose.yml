@@ -1,0 +1,50 @@
+# Self-hosted Umami (usage statistics) for isobike: the dashboard and the
+# tracking script at https://stats.isobike.ch, behind Caddy. Installed to
+# /opt/umami by deploy/setup-umami.sh, which also writes the .env next to it
+# (random secrets, root-only).
+#
+# Both containers are capped in memory so statistics can never crowd out the
+# routing API. Umami listens on localhost only; Caddy is the way in.
+
+services:
+  umami:
+    image: ghcr.io/umami-software/umami:latest
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      DATABASE_URL: postgresql://umami:${POSTGRES_PASSWORD:?missing in .env}@db:5432/umami
+      APP_SECRET: ${APP_SECRET:?missing in .env}
+      TWO_FACTOR_ENCRYPTION_KEY: ${TWO_FACTOR_ENCRYPTION_KEY:?missing in .env}
+      DISABLE_TELEMETRY: 1
+    depends_on:
+      db:
+        condition: service_healthy
+    init: true
+    restart: always
+    mem_limit: 600m
+    healthcheck:
+      test: ["CMD-SHELL", "curl http://localhost:3000/api/heartbeat"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  db:
+    image: postgres:15-alpine
+    # Small site, small database: keep Postgres' own memory use low.
+    command: postgres -c shared_buffers=64MB -c max_connections=30
+    environment:
+      POSTGRES_DB: umami
+      POSTGRES_USER: umami
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?missing in .env}
+    volumes:
+      - umami-db-data:/var/lib/postgresql/data
+    restart: always
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  umami-db-data:

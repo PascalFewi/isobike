@@ -14,6 +14,10 @@ node_modules/
 dist/
 .wrangler/
 
+# Site-specific script (ads, partner links): private, served per deployment, never
+# in the open-source code. See frontend/src/components/AdSlot.tsx.
+frontend/public/site/
+
 # Local env overrides (production values live in frontend/.env.production)
 .env.local
 .env.*.local

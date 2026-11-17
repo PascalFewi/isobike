@@ -270,6 +270,23 @@ button.link:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; 
 .export-actions button.secondary { background: transparent; color: var(--ink); border-color: var(--line); }
 .export-actions button:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
 
+/* Text pages in a dialog (PrivacyDialog.tsx). */
+.export-dialog.legal p, .export-dialog.legal ul { margin: 0 0 6px; font-size: var(--fs-2); line-height: 1.5; }
+.export-dialog.legal ul { padding-left: 1.2em; }
+.export-dialog.legal section > :last-child { margin-bottom: 0; }
+.export-dialog.legal a { color: inherit; text-decoration: underline; }
+
+/* ---------------------------------------------------------------- ad slots (AdSlot.tsx) */
+/* Always labelled "Anzeige": advertising must be recognisable as such. */
+.ad-slot { display: grid; gap: 3px; }
+.ad-slot[hidden] { display: none; }
+.ad-label { font-size: var(--fs-mini); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.ad-slot.placeholder .ad-body {
+  display: grid; place-items: center; min-height: 56px; padding: 6px 10px; text-align: center;
+  border: 1px dashed #b8beb7; border-radius: 5px; background: var(--soft);
+  font-size: var(--fs-2); color: var(--muted);
+}
+
 /* ---------------------------------------------------------------- footer */
 .footer {
   position: absolute; z-index: 10; left: 0; right: 0; bottom: 0; height: var(--footer-h);
